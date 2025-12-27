@@ -10,7 +10,7 @@ roles:
     src: https://github.com/usegalaxy-eu/ansible-htcondor-grycap
     version: d9a4aab0052dfb31d48c986d39a7f5e3692abba4
   - name: galaxyproject.proftpd
-    version: 0.3.2
+    version: 0.3.3
   - name: geerlingguy.rabbitmq
     src: https://github.com/geerlingguy/ansible-role-rabbitmq
     version: be4e264e7ddbd6c4cdea94b2b53fe996b8ad50e0
