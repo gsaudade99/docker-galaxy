@@ -3,6 +3,10 @@
 {% endif %}
 {% if container_resolution_cached_mulled %}
 - type: cached_mulled
+- type: cached_mulled_singularity
+  cache_directory: "/cvmfs/singularity.galaxyproject.org/all"
+- type: cached_mulled_singularity
+  cache_directory: "/export/container_cache/singularity/mulled"
 {% endif %}
 {% if container_resolution_mulled %}
 - type: mulled
