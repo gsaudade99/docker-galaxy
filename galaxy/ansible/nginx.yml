@@ -2,6 +2,14 @@
   connection: local
   remote_user: root
   vars:
+    # Default container config: avoid DH param generation and OCSP stapling
+    # errors in ephemeral/self-signed setups. Override in production.
+    nginx_conf_ssl_protocols:
+      - TLSv1.2
+      - TLSv1.3
+    nginx_conf_ssl_dhparam: false
+    nginx_conf_ssl_stapling: "off"
+    nginx_conf_ssl_stapling_verify: "off"
     nginx_conf_http:
       client_max_body_size: 50g
       proxy_buffers: 8 16k

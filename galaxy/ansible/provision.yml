@@ -82,4 +82,3 @@
 - import_playbook: galaxy_vault_config.yml
   when: galaxy_vault_config | bool
   tags: galaxy_vault_config
-
