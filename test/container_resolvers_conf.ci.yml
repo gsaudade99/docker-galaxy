@@ -1,0 +1,4 @@
+# Minimal container resolvers for CI to keep resolve_toolbox fast.
+- type: explicit
+- type: cached_mulled_singularity
+  cache_directory: "/export/container_cache/singularity/mulled"
