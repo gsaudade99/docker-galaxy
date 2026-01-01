@@ -81,7 +81,7 @@ jobs:
         if: contains(matrix.infrastructure.exclude_test, matrix.test.name) != true
         run: echo "run=true" >> $GITHUB_OUTPUT
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Set WORKFLOWS env for worfklows-test
         if: matrix.test.workflow
         run: echo "WORKFLOWS=${{ matrix.test.workflow }}" >> $GITHUB_ENV
@@ -91,6 +91,8 @@ jobs:
         run: |
           docker buildx build  \
             --output "type=image,name=quay.io/bgruening/$image_name:ci-testing" \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
             --build-arg IMAGE_TAG=ci-testing \
             $image_name
         working-directory: ./compose/base-images
@@ -100,6 +102,8 @@ jobs:
         run: |
           docker buildx build  \
             --output "type=image,name=quay.io/bgruening/$image_name:ci-testing" \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
             --build-arg IMAGE_TAG=ci-testing \
             $image_name
         working-directory: ./compose/base-images
@@ -145,7 +149,7 @@ jobs:
         if: failure()
         run: sudo chmod -R +r ./compose/export/galaxy/database
       - name: Save artifacts for debugging a failed test
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: failure()
         with:
           name: ${{ matrix.infrastructure.name }}_${{ matrix.test.name }}_first-run
@@ -191,7 +195,7 @@ jobs:
         if: failure() && matrix.test.second_run == 'true'
         run: sudo chmod -R +r ./compose/export/galaxy/database
       - name: Save artifacts for debugging a failed test
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: failure() && matrix.test.second_run == 'true'
         with:
           name: ${{ matrix.infrastructure.name }}_${{ matrix.test.name }}_second-run
