@@ -71,6 +71,75 @@ log_error() {
     print_log "$COLOR_ERROR" "Error: $*"
 }
 
+show_runtime_summary() {
+    local gunicorn_workers="${GUNICORN_WORKERS:-2}"
+    local handler_processes="${GALAXY_HANDLER_NUMPROCS:-2}"
+    local celery_workers="${CELERY_WORKERS:-2}"
+    local destination_default="${GALAXY_DESTINATIONS_DEFAULT:-slurm_cluster}"
+    local slurm_enabled="${GALAXY_RUNNERS_ENABLE_SLURM:-default}"
+    local condor_enabled="${GALAXY_RUNNERS_ENABLE_CONDOR:-default}"
+    local docker_enabled="${GALAXY_DOCKER_ENABLED:-default}"
+    local mulled_enabled="${GALAXY_CONFIG_ENABLE_MULLED_CONTAINERS:-default}"
+    local conda_auto="${GALAXY_CONFIG_CONDA_AUTO_INSTALL:-default}"
+    local conda_prefix="${GALAXY_CONDA_PREFIX:-/tool_deps/_conda}"
+    local docker_label="default (galaxy.yml)"
+    local mulled_label="default (galaxy.yml)"
+
+    if [ -n "${GALAXY_DOCKER_ENABLED+x}" ]; then
+        docker_label="$docker_enabled"
+    fi
+    if [ -n "${GALAXY_CONFIG_ENABLE_MULLED_CONTAINERS+x}" ]; then
+        mulled_label="$mulled_enabled"
+    fi
+
+    log_info "Runtime summary:"
+    log_info "  Web workers (gunicorn): ${gunicorn_workers}"
+    log_info "  Job handlers: ${handler_processes}"
+    log_info "  Celery workers: ${celery_workers}"
+    log_info "  Default destination: ${destination_default}"
+    log_info "  Runners: slurm=${slurm_enabled}, condor=${condor_enabled}"
+    log_info "  Containers: docker=${docker_label}, mulled=${mulled_label}"
+    log_info "  Conda: auto_install=${conda_auto}, prefix=${conda_prefix}"
+    log_info "  Docs: https://github.com/bgruening/docker-galaxy"
+}
+
+mask_sensitive_value() {
+    local name="$1"
+    local value="$2"
+
+    case "$name" in
+        *KEY*|*SECRET*|*TOKEN*|*PASSWORD*|*PASSPHRASE*)
+            printf '***'
+            ;;
+        *)
+            printf '%s' "$value"
+            ;;
+    esac
+}
+
+show_galaxy_env_summary() {
+    local envs
+    envs="$(env | LC_ALL=C sort | grep '^GALAXY_')" || true
+
+    if [ -z "$envs" ]; then
+        log_info "Environment overrides (GALAXY_*): none"
+        return
+    fi
+
+    log_info "Environment overrides (GALAXY_*):"
+    while IFS='=' read -r name value; do
+        if [ -z "$name" ]; then
+            continue
+        fi
+        local display_value
+        display_value="$(mask_sensitive_value "$name" "$value")"
+        if [ "${#display_value}" -gt 200 ]; then
+            display_value="${display_value:0:200}..."
+        fi
+        log_info "  ${name}=${display_value}"
+    done <<< "$envs"
+}
+
 show_startup_log_tail() {
     tail -n "$STARTUP_LOG_TAIL" "$STARTUP_LOG" >&${STARTUP_OUT_FD} || true
 }
@@ -242,6 +311,10 @@ cd $GALAXY_ROOT_DIR
 
 cvmfs_repos="${CVMFS_REPOSITORIES:-data.galaxyproject.org singularity.galaxyproject.org}"
 cvmfs_repos="${cvmfs_repos//,/ }"
+cvmfs_autofs_configured=false
+if [ -f /etc/auto.cvmfs ] || [ -f /etc/auto.master.d/cvmfs.autofs ]; then
+    cvmfs_autofs_configured=true
+fi
 
 if $PRIVILEGED; then
     log_info "Configuring CVMFS mounts (privileged)"
@@ -249,15 +322,26 @@ if $PRIVILEGED; then
 
     if command -v mount.cvmfs >/dev/null 2>&1; then
         chmod 666 /dev/fuse || true
-        for repo in $cvmfs_repos; do
-            repo_dir="/cvmfs/$repo"
-            mkdir -p "$repo_dir"
-            if ! mountpoint -q "$repo_dir"; then
-                log_info "Mounting CVMFS repo $repo"
-                mount -t cvmfs "$repo" "$repo_dir" || log_warn "Failed to mount CVMFS repo $repo"
-            fi
-        done
+        if $cvmfs_autofs_configured; then
+            log_info "CVMFS autofs configured; mounts will appear on first access after services start."
+        else
+            for repo in $cvmfs_repos; do
+                repo_dir="/cvmfs/$repo"
+                mkdir -p "$repo_dir"
+                if ! mountpoint -q "$repo_dir"; then
+                    log_info "Mounting CVMFS repo $repo"
+                    if ! mount -t cvmfs "$repo" "$repo_dir"; then
+                        sleep 2
+                        mount -t cvmfs "$repo" "$repo_dir" || log_warn "Failed to mount CVMFS repo $repo"
+                    fi
+                fi
+            done
+        fi
+    else
+        log_info "CVMFS client not available; install CVMFS or use the sidecar via docker-compose --profile cvmfs."
     fi
+else
+    log_info "CVMFS mounts disabled (not running privileged). Use --privileged or the CVMFS sidecar in docker-compose."
 fi
 
 if ! mountpoint -q /cvmfs 2>/dev/null; then
@@ -270,6 +354,9 @@ if ! mountpoint -q /cvmfs 2>/dev/null; then
     done
     chown -R "$GALAXY_USER:$GALAXY_USER" /cvmfs
 fi
+
+show_runtime_summary
+show_galaxy_env_summary
 
 if [[ ! -z $STARTUP_EXPORT_USER_FILES ]]; then
     # If /export/ is mounted, export_user_files file moving all data to /export/
@@ -562,34 +649,36 @@ function start_supervisor {
     wait_services
 
     if [[ ! -z $SUPERVISOR_MANAGE_SLURM ]]; then
-        echo "Starting munge"
+        log_info "Starting munge"
+        mkdir -p /tmp/slurm && chown -R "${GALAXY_USER:-galaxy}:${GALAXY_USER:-galaxy}" /tmp/slurm
         supervisorctl start munge
         wait_for_munge || true
 
         if [[ $NONUSE != *"slurmctld"* ]]
         then
-            echo "Starting slurmctld"
+            log_info "Starting slurmctld"
             supervisorctl start slurmctld
         fi
         if [[ $NONUSE != *"slurmd"* ]]
         then
-            echo "Starting slurmd"
+            log_info "Starting slurmd"
             supervisorctl start slurmd
         fi
     else
-        echo "Starting munge"
+        log_info "Starting munge"
         mkdir -p /var/run/munge && chown -R root:root /var/run/munge
-        /usr/sbin/munged -f -F --num-threads=10 &
+        mkdir -p /tmp/slurm && chown -R "${GALAXY_USER:-galaxy}:${GALAXY_USER:-galaxy}" /tmp/slurm
+        /usr/sbin/munged -f -F --num-threads="${MUNGE_NUM_THREADS:-2}" &
         wait_for_munge || true
 
         if [[ $NONUSE != *"slurmctld"* ]]
         then
-            echo "Starting slurmctld"
+            log_info "Starting slurmctld"
             /usr/sbin/slurmctld -L $GALAXY_LOGS_DIR/slurmctld.log
         fi
         if [[ $NONUSE != *"slurmd"* ]]
         then
-            echo "Starting slurmd"
+            log_info "Starting slurmd"
             /usr/sbin/slurmd -L $GALAXY_LOGS_DIR/slurmd.log
         fi
     fi
@@ -597,14 +686,14 @@ function start_supervisor {
     if [[ ! -z $SUPERVISOR_MANAGE_RABBITMQ ]]; then
         if [[ $NONUSE != *"rabbitmq"* ]]
         then
-            echo "Starting rabbitmq"
+            log_info "Starting rabbitmq"
             supervisorctl start rabbitmq
 
             wait_for_rabbitmq
-            echo "Configuring rabbitmq users"
+            log_info "Configuring rabbitmq users"
             ansible-playbook -c local /usr/local/bin/configure_rabbitmq_users.yml &> /dev/null
 
-            echo "Restarting rabbitmq"
+            log_info "Restarting rabbitmq"
             supervisorctl restart rabbitmq
         fi    
     fi
@@ -612,7 +701,7 @@ function start_supervisor {
     if [[ ! -z $SUPERVISOR_MANAGE_FLOWER ]]; then 
         if [[ $NONUSE != *"flower"* && $NONUSE != *"celery"* && $NONUSE != *"rabbitmq"* ]]
         then
-            echo "Starting flower"
+            log_info "Starting flower"
             supervisorctl start flower
         fi
     fi
@@ -622,7 +711,7 @@ function start_gravity {
     if [[ ! -z $GRAVITY_MANAGE_CELERY ]]; then
         if [[ $NONUSE == *"celery"* ]]
         then
-            echo "Disabling Galaxy celery app"
+            log_info "Disabling Galaxy celery app"
             python3 /usr/local/bin/update_yaml_value "${GRAVITY_CONFIG_FILE}" "gravity.celery.enable" "false" &> /dev/null
             python3 /usr/local/bin/update_yaml_value "${GRAVITY_CONFIG_FILE}" "gravity.celery.enable_beat" "false" &> /dev/null
         else
@@ -639,7 +728,7 @@ function start_gravity {
     if [[ ! -z $GRAVITY_MANAGE_GX_IT_PROXY ]]; then
         if [[ $NONUSE == *"nodejs"* ]]
         then
-            echo "Disabling nodejs"
+            log_info "Disabling nodejs"
             python3 /usr/local/bin/update_yaml_value "${GRAVITY_CONFIG_FILE}" "gravity.gx_it_proxy.enable" "false" &> /dev/null
         else
             # TODO: Remove this after gravity config manager is updated to handle env vars properly
@@ -650,7 +739,7 @@ function start_gravity {
     if [[ ! -z $GRAVITY_MANAGE_TUSD ]]; then
         if [[ $NONUSE == *"tusd"* ]]
         then
-            echo "Disabling Galaxy tusd app"
+            log_info "Disabling Galaxy tusd app"
             python3 /usr/local/bin/update_yaml_value "${GRAVITY_CONFIG_FILE}" "gravity.tusd.enable" "false" &> /dev/null
             cp /etc/nginx/delegated_uploads.conf /etc/nginx/delegated_uploads.conf.source 
             echo "# No delegated uploads" > /etc/nginx/delegated_uploads.conf
@@ -663,7 +752,7 @@ function start_gravity {
     if [[ ! -z $GRAVITY_MANAGE_REPORTS ]]; then
         if [[ $NONUSE == *"reports"* ]]
         then
-            echo "Disabling Galaxy reports webapp"
+            log_info "Disabling Galaxy reports webapp"
             python3 /usr/local/bin/update_yaml_value "${GRAVITY_CONFIG_FILE}" "gravity.reports.enable" "false" &> /dev/null
         fi
     fi
@@ -709,10 +798,11 @@ if $PRIVILEGED; then
 
     if [[ -z $DOCKER_PARENT ]]; then
         #build the docker in docker environment
-        bash /root/cgroupfs_mount.sh
+        # Ensure cgroup mounts are set up without triggering dind "no command" warnings.
+        bash /root/cgroupfs_mount.sh true
         log_info "Starting services (supervisord)"
         start_supervisor
-        log_info "Starting Galaxy"
+        log_info "Starting Galaxy (gunicorn=${GUNICORN_WORKERS:-2}, handlers=${GALAXY_HANDLER_NUMPROCS:-2}, celery=${CELERY_WORKERS:-2})"
         start_gravity
         supervisorctl start docker
         wait_for_docker
@@ -722,7 +812,7 @@ if $PRIVILEGED; then
         echo "$GALAXY_USER ALL = NOPASSWD : ALL" >> /etc/sudoers
         log_info "Starting services (supervisord)"
         start_supervisor
-        log_info "Starting Galaxy"
+        log_info "Starting Galaxy (gunicorn=${GUNICORN_WORKERS:-2}, handlers=${GALAXY_HANDLER_NUMPROCS:-2}, celery=${CELERY_WORKERS:-2})"
         start_gravity
     fi
     if  [[ ! -z $PULL_IT_IMAGES ]]; then
@@ -743,7 +833,7 @@ else
     export GALAXY_CONFIG_INTERACTIVETOOLS_ENABLE=False
     log_info "Starting services (supervisord)"
     start_supervisor
-    log_info "Starting Galaxy"
+    log_info "Starting Galaxy (gunicorn=${GUNICORN_WORKERS:-2}, handlers=${GALAXY_HANDLER_NUMPROCS:-2}, celery=${CELERY_WORKERS:-2})"
     start_gravity
 fi
 
