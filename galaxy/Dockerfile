@@ -174,6 +174,8 @@ RUN apt-get -qq update \
     # Install ansible roles
     && ansible-galaxy install -r /ansible/requirements.yml -p /ansible/roles \
     && npm install -g @galaxyproject/gx-it-proxy@latest \
+    && apt-get purge -y npm \
+    && apt-get autoremove -y \
     && groupadd -r $GALAXY_USER -g $GALAXY_GID \
     && useradd -u $GALAXY_UID -r -g $GALAXY_USER -d $GALAXY_HOME -m -c "Galaxy user" --shell /bin/bash $GALAXY_USER \
     # Create the postgres user before apt-get does (with the configured UID/GID) to facilitate sharing $EXPORT_DIR/postgresql with non-Linux hosts
@@ -289,9 +291,17 @@ RUN mkdir -p $GALAXY_CONFIG_TUS_UPLOAD_STORE \
     && cp $GALAXY_HOME/.bashrc ~/ \
     && su $GALAXY_USER -c "cp $GALAXY_ROOT_DIR/config/galaxy.yml.sample $GALAXY_CONFIG_FILE" \
     && su $GALAXY_USER -c "cp $GALAXY_ROOT_DIR/config/tool_conf.xml.sample $GALAXY_CONFIG_TOOL_CONFIG_FILE" \
+    && ansible-playbook /ansible/galaxy_job_conf.yml \
+    --extra-vars galaxy_server_dir=$GALAXY_ROOT_DIR \
+    --extra-vars galaxy_config_dir=$GALAXY_CONFIG_DIR \
+    --extra-vars galaxy_config_file=$GALAXY_CONFIG_FILE \
+    --extra-vars galaxy_job_conf_path=$GALAXY_CONFIG_JOB_CONFIG_FILE \
+    --extra-vars galaxy_container_resolvers_conf_path=$GALAXY_CONFIG_CONTAINER_RESOLVERS_CONFIG_FILE \
+    --extra-vars galaxy_user_name=$GALAXY_USER \
     && curl -o $GALAXY_CONFIG_TOOL_DATA_TABLE_CONFIG_PATH \
     -L https://raw.githubusercontent.com/galaxyproject/usegalaxy-playbook/8adb1f82c94fe95b09df2a2816440ce2420b7d39/env/main/files/galaxy/config/tool_data_table_conf.xml \
     && chown $GALAXY_USER:$GALAXY_USER $GALAXY_CONFIG_TOOL_DATA_TABLE_CONFIG_PATH \
+    # Ensure Galaxy uses the jemalloc we built (gridengine compatibility: #10425).
     && mv /usr/lib/x86_64-linux-gnu/libjemalloc.so.2 /usr/lib/x86_64-linux-gnu/libjemalloc.so.2.orig \
     && ln -s /usr/local/lib/libjemalloc.so.2 /usr/lib/x86_64-linux-gnu/libjemalloc.so.2
 
