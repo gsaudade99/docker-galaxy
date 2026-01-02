@@ -888,6 +888,32 @@ The data-managers can be configured and specified in a YAML file similar to this
 If you host your flavor on GitHub consider to test our build with Travis-CI. This project will help you:
 https://github.com/bgruening/galaxy-flavor-testing
 
+## Test matrix <a name="Test-matrix" /> [[toc]](#toc)
+
+The project includes local test scripts and CI workflows. Use the matrix below to decide what to run.
+
+| Area | Script / Workflow | Requires | Notes |
+| --- | --- | --- | --- |
+| Image build | `docker build -t galaxy:test galaxy/` | Docker | Baseline image build. |
+| Startup sanity | `docker run --rm --privileged galaxy:test /usr/bin/startup2` | Privileged | Confirms services start and CVMFS messaging is sane. |
+| Bioblend | `test/bioblend/test.sh` | Running Galaxy container | Uses a Bioblend test image against Galaxy. |
+| Slurm | `test/slurm/test.sh` | Docker, Slurm test image | Uses external Slurm container; set `GALAXY_IMAGE=galaxy:test` if needed. |
+| SGE (Grid Engine) | `test/gridengine/test.sh` | Docker, SGE test image | Uses ephemeris container to wait for Galaxy. |
+| CVMFS sidecar | `test/cvmfs/test.sh` | Privileged | Builds and validates mount propagation from sidecar. |
+| FTP/SFTP | `.github/workflows/single.sh` | Docker, sshpass (CI) | FTP and SFTP checks run in CI; local run skips SFTP if `sshpass` is missing. |
+| /export persistence | `startup.sh` / `startup2.sh` | `/export` volume | Export and cache relocation happens during startup; exercised by CI runs. |
+| HTTPS/TLS | `.github/workflows/single.sh` | Docker | Uses `curl` and `openssl s_client` against port 443. |
+| Tool install smoke | `.github/workflows/single.sh` | Docker | Installs sample tools and verifies tool availability. |
+| Container resolvers | `test/container_resolvers_conf.ci.yml` | Galaxy container | CI uses a minimal resolver config for toolbox resolution tests. |
+| Image analysis (optional) | `.github/workflows/single.sh` | `dive` | Runs only when `dive` is installed. |
+| Single-container CI | `.github/workflows/single_container.yml` | CI | Full container test (privileged). |
+| Multi-test CI | `.github/workflows/single.sh` | CI | Builds image + runs SLURM, SGE, Bioblend; uses buildx cache. |
+
+Notes:
+- If `/tmp` is small in CI, set `TMPDIR=/var/tmp` for test scripts.
+- CVMFS sidecar CI builds/pushes on tags; branch pushes run tests only when CVMFS paths change.
+
+
 
 
 ## List of Galaxy flavours <a name="List-of-Galaxy-flavours" /> [[toc]](#toc)
