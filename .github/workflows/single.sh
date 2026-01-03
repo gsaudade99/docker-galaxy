@@ -160,4 +160,6 @@ CI=true dive quay.io/bgruening/galaxy
 
 docker stop galaxy
 docker rm -f galaxy
-docker rmi -f $DOCKER_RUN_CONTAINER
+if [[ "${KEEP_IMAGE:-false}" != "true" ]]; then
+    docker rmi -f $DOCKER_RUN_CONTAINER
+fi
