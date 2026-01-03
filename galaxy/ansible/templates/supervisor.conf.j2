@@ -32,7 +32,8 @@ stdout_logfile  = /var/log/autofs.log
 [program:munge]
 user=root
 # In VMs the chown seems to be needed, in containers the mkdir.
-command=/bin/bash -c "mkdir -p /var/run/munge && chown -R root:root /var/run/munge && /usr/sbin/munged -f -F"
+# Keep munge threads modest by default; increase via munge_num_threads if needed.
+command=/bin/bash -c "mkdir -p /var/run/munge && chown -R root:root /var/run/munge && /usr/sbin/munged -f -F --num-threads={{ munge_num_threads | default(2) }}"
 redirect_stderr = true
 priority        = 100
 stopasgroup     = true
@@ -165,5 +166,5 @@ autostart       = {{ supervisor_flower_autostart }}
 autorestart     = true
 startsecs       = 10
 user            = {{ galaxy_user_name }}
-environment     = PATH={{ galaxy_venv_dir }}:{{ galaxy_venv_dir }}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin,PYTHONPATH=lib,GALAXY_CONFIG_FILE={{ galaxy_config_file }}
+environment     = PATH={{ galaxy_venv_dir }}:{{ galaxy_venv_dir }}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin,PYTHONPATH={{ galaxy_server_dir }}/lib,GALAXY_ROOT_DIR={{ galaxy_server_dir }},GALAXY_CONFIG_FILE={{ galaxy_config_file }}
 {% endif %}

@@ -7,8 +7,8 @@ set -x
 find / -name '*.pyc' -delete
 
 find / -name '*.log' -delete
-find / -name '.cache' -type d -prune -exec rm -rf '{}' +
-find / -name '.npm' -type d -prune -exec rm -rf '{}' +
+find / -path /root/.cache -prune -o -name '.cache' -type d -prune -exec rm -rf '{}' +
+find / -path /root/.npm -prune -o -name '.npm' -type d -prune -exec rm -rf '{}' +
 find / -name '.launchpadlib' -type d -prune -exec rm -rf '{}' +
 rm -rf /var/lib/apt/lists/*
 rm -rf /var/cache/*

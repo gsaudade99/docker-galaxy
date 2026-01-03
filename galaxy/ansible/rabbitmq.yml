@@ -2,14 +2,67 @@
   connection: local
   remote_user: root
   vars:
-    rabbitmq_version: 4.0.3
-    rabbitmq_apt_repository: "deb [signed-by=/etc/apt/trusted.gpg.d/rabbitmq-9F4587F226208342.gpg] https://ppa1.rabbitmq.com/rabbitmq/rabbitmq-server/deb/{{ ansible_distribution | lower }} {{ ansible_distribution_release }} main"
-    rabbitmq_apt_gpg_url: https://github.com/rabbitmq/signing-keys/releases/download/3.0/cloudsmith.rabbitmq-server.9F4587F226208342.key
-    erlang_apt_repository: "deb [signed-by=/etc/apt/trusted.gpg.d/erlang-E495BB49CC4BBE5B.gpg] https://ppa1.rabbitmq.com/rabbitmq/rabbitmq-erlang/deb/{{ ansible_distribution | lower }} {{ ansible_distribution_release }} main"
-    erlang_apt_gpg_url: https://github.com/rabbitmq/signing-keys/releases/download/3.0/cloudsmith.rabbitmq-erlang.E495BB49CC4BBE5B.key
-  roles:
-    - role: geerlingguy.rabbitmq
+    rabbitmq_keyring_path: /usr/share/keyrings/com.rabbitmq.team.gpg
+    rabbitmq_repo_list_path: /etc/apt/sources.list.d/rabbitmq.list
+    rabbitmq_version: 4.2.2-1
+    rabbitmq_erlang_packages:
+      - erlang-base
+      - erlang-asn1
+      - erlang-crypto
+      - erlang-eldap
+      - erlang-ftp
+      - erlang-inets
+      - erlang-mnesia
+      - erlang-os-mon
+      - erlang-parsetools
+      - erlang-public-key
+      - erlang-runtime-tools
+      - erlang-snmp
+      - erlang-ssl
+      - erlang-syntax-tools
+      - erlang-tftp
+      - erlang-tools
+      - erlang-xmerl
   tasks:
+    - name: Install RabbitMQ repository prerequisites
+      apt:
+        name:
+          - curl
+          - gnupg
+          - apt-transport-https
+        state: present
+        update_cache: true
+
+    - name: Add RabbitMQ signing key
+      shell: |
+        curl -1sLf "https://keys.openpgp.org/vks/v1/by-fingerprint/0A9AF2115F4687BD29803A206B73A36E6026DFCA" | gpg --dearmor -o {{ rabbitmq_keyring_path }}
+      args:
+        creates: "{{ rabbitmq_keyring_path }}"
+
+    - name: Configure RabbitMQ apt repositories
+      copy:
+        dest: "{{ rabbitmq_repo_list_path }}"
+        content: |
+          ## Modern Erlang/OTP releases
+          deb [arch=amd64 signed-by={{ rabbitmq_keyring_path }}] https://deb1.rabbitmq.com/rabbitmq-erlang/ubuntu/noble noble main
+          deb [arch=amd64 signed-by={{ rabbitmq_keyring_path }}] https://deb2.rabbitmq.com/rabbitmq-erlang/ubuntu/noble noble main
+
+          ## Latest RabbitMQ releases
+          deb [arch=amd64 signed-by={{ rabbitmq_keyring_path }}] https://deb1.rabbitmq.com/rabbitmq-server/ubuntu/noble noble main
+          deb [arch=amd64 signed-by={{ rabbitmq_keyring_path }}] https://deb2.rabbitmq.com/rabbitmq-server/ubuntu/noble noble main
+
+    - name: Install Erlang packages
+      apt:
+        name: "{{ rabbitmq_erlang_packages }}"
+        state: present
+        update_cache: true
+
+    - name: Install RabbitMQ server
+      apt:
+        name: "rabbitmq-server={{ rabbitmq_version }}"
+        state: present
+        update_cache: true
+
     - name: Enable rabbitmq management plugin
       rabbitmq_plugin:
         name: rabbitmq_management

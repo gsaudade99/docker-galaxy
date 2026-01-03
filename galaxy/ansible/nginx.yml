@@ -2,6 +2,14 @@
   connection: local
   remote_user: root
   vars:
+    # Default container config: avoid DH param generation and OCSP stapling
+    # errors in ephemeral/self-signed setups. Override in production.
+    nginx_conf_ssl_protocols:
+      - TLSv1.2
+      - TLSv1.3
+    nginx_conf_ssl_dhparam: false
+    nginx_conf_ssl_stapling: "off"
+    nginx_conf_ssl_stapling_verify: "off"
     nginx_conf_http:
       client_max_body_size: 50g
       proxy_buffers: 8 16k
@@ -41,6 +49,10 @@
     nginx_servers:
       - galaxy_http
       - interactive_tools_http
+    galaxy_errordocs:
+      - { code: '502', src: '502.html' }
+      - { code: '413', src: '413.html' }
+      - { code: '500', src: '500.html' }
   
   # this is required as we re-run this playbook during startup (while setting up ssl or proxy prefix)
   pre_tasks:
@@ -81,6 +93,19 @@
         owner: "{{ galaxy_user_name }}"
         group: "{{ galaxy_user_name }}"
         mode: "0600"
+    
+    - name: Create directories for error docs
+      file:
+        path: "{{ galaxy_errordocs_dir }}/{{ item.code }}"
+        state: directory
+      loop: "{{ galaxy_errordocs }}"
+
+    - name: Copy error docs into their respective directories
+      copy:
+        src: "{{ item.src }}"
+        dest: "{{ galaxy_errordocs_dir }}/{{ item.code }}/index.html"
+        mode: '0755'
+      loop: "{{ galaxy_errordocs }}"
 
   post_tasks:
     - name: Ensure 'daemon off' in nginx.conf as we use supervisor to manage nginx

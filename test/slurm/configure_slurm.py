@@ -1,7 +1,8 @@
 from socket import gethostname
 from string import Template
 from os import environ
-import psutil
+import subprocess
+import json
 
 
 SLURM_CONFIG_TEMPLATE = '''
@@ -42,6 +43,7 @@ SwitchType=switch/none
 TaskPlugin=task/none
 #TaskPluginParam=
 #TaskProlog=
+JobAcctGatherType=jobacct_gather/none
 InactiveLimit=0
 KillWait=30
 MinJobAge=300
@@ -52,7 +54,7 @@ SlurmdTimeout=300
 #VSizeFactor=0
 Waittime=0
 SchedulerType=sched/backfill
-SelectType=select/cons_res
+SelectType=select/cons_tres
 SelectTypeParameters=CR_Core_Memory
 AccountingStorageType=accounting_storage/none
 #AccountingStorageUser=
@@ -71,21 +73,94 @@ SlurmctldDebug=3
 #SlurmctldLogFile=
 SlurmdDebug=3
 #SlurmdLogFile=
-NodeName=$hostname CPUs=$cpus RealMemory=$memory State=UNKNOWN
+NodeName=$hostname CPUs=$cpus RealMemory=$memory State=UNKNOWN$topology
 PartitionName=$partition_name Nodes=$nodes Default=YES MaxTime=INFINITE State=UP Shared=YES
 '''
 
-try:
-    # psutil version 0.2
-    cpus = psutil.NUM_CPUS
-    mem = psutil.TOTAL_PHYMEM
-except:
-    # psutil version 0.3
-    cpus = psutil.cpu_count()
-    mem = psutil.virtual_memory().total
+ENV_MAP = {
+    "CPUs": "SLURM_CPUS",
+    "RealMemory": "SLURM_MEMORY",
+    "Boards": "SLURM_BOARDS",
+    "SocketsPerBoard": "SLURM_SOCKETS_PER_BOARD",
+    "CoresPerSocket": "SLURM_CORES_PER_SOCKET",
+    "ThreadsPerCore": "SLURM_THREADS_PER_CORE",
+}
+
+def _as_int(value):
+    try:
+        return int(str(value).split()[0])
+    except (TypeError, ValueError):
+        return None
+
+def _slurmd_status():
+    try:
+        output = subprocess.check_output(["slurmd", "-C"], stderr=subprocess.DEVNULL).decode("utf-8")
+    except Exception:
+        return {}
+    info = {}
+    for chunk in output.split():
+        if "=" in chunk:
+            key, value = chunk.split("=", 1)
+            info[key] = value
+    return info
+
+def _lscpu_status():
+    try:
+        output = subprocess.check_output(["lscpu", "-J"], stderr=subprocess.DEVNULL).decode("utf-8")
+        data = json.loads(output)
+    except Exception:
+        return {}
+    fields = {}
+    for entry in data.get("lscpu", []):
+        field = entry.get("field", "").strip().strip(":")
+        fields[field] = entry.get("data")
+    cpus = _as_int(fields.get("CPU(s)"))
+    sockets = _as_int(fields.get("Socket(s)"))
+    cores = _as_int(fields.get("Core(s) per socket"))
+    threads = _as_int(fields.get("Thread(s) per core"))
+    info = {}
+    if cpus is not None:
+        info["CPUs"] = str(cpus)
+    if sockets is not None:
+        info["SocketsPerBoard"] = str(sockets)
+    if cores is not None:
+        info["CoresPerSocket"] = str(cores)
+    if threads is not None:
+        info["ThreadsPerCore"] = str(threads)
+    info.setdefault("Boards", "1")
+    return info
+
+def _real_memory_mb():
+    try:
+        with open("/proc/meminfo", "r") as handle:
+            for line in handle:
+                if line.startswith("MemTotal:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(int(parts[1]) / 1024)
+    except Exception:
+        return None
+    return None
 
 def main():
     hostname = gethostname()
+    dict_status = _slurmd_status()
+    for key, value in _lscpu_status().items():
+        dict_status.setdefault(key, value)
+    if "RealMemory" not in dict_status:
+        real_memory = _real_memory_mb()
+        if real_memory is not None:
+            dict_status["RealMemory"] = str(real_memory)
+    cpus = dict_status.get("CPUs") or "1"
+    memory = dict_status.get("RealMemory") or "1024"
+    topology_parts = []
+    for key in ("Boards", "SocketsPerBoard", "CoresPerSocket", "ThreadsPerCore"):
+        env_key = ENV_MAP.get(key)
+        value = environ.get(env_key) if env_key else None
+        if value is None:
+            value = dict_status.get(key)
+        if value is not None:
+            topology_parts.append(f" {key}={value}")
     template_params = {
         "hostname": hostname,
         "nodes": ",".join(environ.get('SLURM_NODES', hostname).split(',')),
@@ -94,10 +169,14 @@ def main():
         "user": environ.get('SLURM_USER_NAME', '{{ galaxy_user_name }}'),
         "cpus": environ.get("SLURM_CPUS", cpus),
         "partition_name": environ.get('SLURM_PARTITION_NAME', 'debug'),
-        "memory": environ.get("SLURM_MEMORY", int(mem / (1024 * 1024)))
+        "memory": environ.get("SLURM_MEMORY", memory),
+        "topology": "".join(topology_parts),
     }
     config_contents = Template(SLURM_CONFIG_TEMPLATE).substitute(template_params)
     open("/etc/slurm/slurm.conf", "w").write(config_contents)
+    # Slurm 24.11 supports disabling cgroups to avoid systemd/cgroup requirements in containers.
+    with open("/etc/slurm/cgroup.conf", "w") as handle:
+        handle.write("CgroupPlugin=disabled\n")
 
 if __name__ == "__main__":
     main()

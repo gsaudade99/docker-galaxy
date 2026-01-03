@@ -149,8 +149,38 @@ fi
 cd $GALAXY_ROOT_DIR
 . $GALAXY_VIRTUAL_ENV/bin/activate
 
+cvmfs_repos="${CVMFS_REPOSITORIES:-data.galaxyproject.org singularity.galaxyproject.org}"
+cvmfs_repos="${cvmfs_repos//,/ }"
+
 if $PRIVILEGED; then
     umount /var/lib/docker
+
+    if command -v mount.cvmfs >/dev/null 2>&1; then
+        chmod 666 /dev/fuse || true
+        for repo in $cvmfs_repos; do
+            repo_dir="/cvmfs/$repo"
+            mkdir -p "$repo_dir"
+            if ! mountpoint -q "$repo_dir"; then
+                echo "Mounting CVMFS repo $repo"
+                mount -t cvmfs "$repo" "$repo_dir" || echo "Warning: failed to mount $repo"
+            fi
+        done
+    else
+        echo "Info: CVMFS client not available; install CVMFS or use the sidecar via docker-compose --profile cvmfs."
+    fi
+else
+    echo "Info: CVMFS mounts disabled (not running privileged). Use --privileged or the CVMFS sidecar in docker-compose."
+fi
+
+if ! mountpoint -q /cvmfs 2>/dev/null; then
+    for repo in $cvmfs_repos; do
+        repo_dir="/cvmfs/$repo"
+        mkdir -p "$repo_dir"
+        if [ "$repo" = "singularity.galaxyproject.org" ]; then
+            mkdir -p "$repo_dir/all"
+        fi
+    done
+    chown -R "$GALAXY_USER:$GALAXY_USER" /cvmfs
 fi
 
 if [[ ! -z $STARTUP_EXPORT_USER_FILES ]]; then
@@ -159,6 +189,11 @@ if [[ ! -z $STARTUP_EXPORT_USER_FILES ]]; then
     # If /export/ is not given, nothing will happen in that step
     echo "Checking /export..."
     python3 /usr/local/bin/export_user_files.py $PG_DATA_DIR_DEFAULT
+    mkdir -p /export/container_cache/singularity/mulled
+    export_cache_owner="$(stat -c '%u:%g' /export/container_cache 2>/dev/null || echo '')"
+    if [[ "$export_cache_owner" != "${GALAXY_UID}:${GALAXY_GID}" ]]; then
+        chown -R "$GALAXY_USER:$GALAXY_USER" /export/container_cache
+    fi
 fi
 
 # Delete compiled templates in case they are out of date
@@ -172,11 +207,19 @@ if [[ ! -z $LOAD_GALAXY_CONDITIONAL_DEPENDENCIES ]]
     then
         echo "Installing optional dependencies in galaxy virtual environment..."
         sudo -E -H -u $GALAXY_USER bash -c '
-            . $GALAXY_VIRTUAL_ENV/bin/activate
             : ${GALAXY_WHEELS_INDEX_URL:="https://wheels.galaxyproject.org/simple"}
             : ${PYPI_INDEX_URL:="https://pypi.python.org/simple"}
-            GALAXY_CONDITIONAL_DEPENDENCIES=$(PYTHONPATH=lib python -c "import galaxy.dependencies; print(\"\\n\".join(galaxy.dependencies.optional(\"$GALAXY_CONFIG_FILE\")))")
-            [ -z "$GALAXY_CONDITIONAL_DEPENDENCIES" ] || echo "$GALAXY_CONDITIONAL_DEPENDENCIES" | pip install -q -r /dev/stdin --index-url "${GALAXY_WHEELS_INDEX_URL}" --extra-index-url "${PYPI_INDEX_URL}"
+            GALAXY_CONDITIONAL_DEPENDENCIES=$(PYTHONPATH=lib "$GALAXY_VIRTUAL_ENV/bin/python" -c "import galaxy.dependencies; print(\"\\n\".join(galaxy.dependencies.optional(\"$GALAXY_CONFIG_FILE\")))")
+            if [ -n "$GALAXY_CONDITIONAL_DEPENDENCIES" ]; then
+                deps_file="$(mktemp)"
+                printf "%s\n" "$GALAXY_CONDITIONAL_DEPENDENCIES" > "$deps_file"
+                /usr/local/bin/uv pip install \
+                    --python "$GALAXY_VIRTUAL_ENV/bin/python" \
+                    -r "$deps_file" \
+                    --index-url "${GALAXY_WHEELS_INDEX_URL}" \
+                    --extra-index-url "${PYPI_INDEX_URL}"
+                rm -f "$deps_file"
+            fi
         '
 fi
 
@@ -184,11 +227,16 @@ if [[ ! -z $LOAD_GALAXY_CONDITIONAL_DEPENDENCIES ]] && [[ ! -z $LOAD_PYTHON_DEV_
     then
         echo "Installing development requirements in galaxy virtual environment..."
         sudo -E -H -u $GALAXY_USER bash -c '
-            . $GALAXY_VIRTUAL_ENV/bin/activate
             : ${GALAXY_WHEELS_INDEX_URL:="https://wheels.galaxyproject.org/simple"}
             : ${PYPI_INDEX_URL:="https://pypi.python.org/simple"}
             dev_requirements="./lib/galaxy/dependencies/dev-requirements.txt"
-            [ -f $dev_requirements ] && pip install -q -r $dev_requirements --index-url "${GALAXY_WHEELS_INDEX_URL}" --extra-index-url "${PYPI_INDEX_URL}"
+            if [ -f "$dev_requirements" ]; then
+                /usr/local/bin/uv pip install \
+                    --python "$GALAXY_VIRTUAL_ENV/bin/python" \
+                    -r "$dev_requirements" \
+                    --index-url "${GALAXY_WHEELS_INDEX_URL}" \
+                    --extra-index-url "${PYPI_INDEX_URL}"
+            fi
         '
 fi
 
@@ -267,8 +315,11 @@ then
 else
     # Configure SLURM with runtime hostname.
     # Use absolute path to python so virtualenv is not used.
+    mkdir -p /etc/slurm
     /usr/bin/python /usr/sbin/configure_slurm.py
 fi
+mkdir -p /tmp/slurm /var/log/slurm /var/lib/slurm/slurmctld
+chown -R $GALAXY_USER:$GALAXY_USER /tmp/slurm /var/log/slurm /var/lib/slurm
 if [ -e /export/munge.key ]
 then
     rm -f /etc/munge/munge.key
@@ -302,6 +353,20 @@ function wait_for_docker {
     echo "Checking if docker daemon is up and running"
     until docker version 2>&1 >/dev/null; do sleep 5; echo "Waiting for docker daemon"; done
     echo "Docker daemon is ready"
+}
+
+function wait_for_munge {
+    local retries=20
+    echo "Checking if munge is up and running"
+    until munge -n >/dev/null 2>&1; do
+        if [[ $retries -le 0 ]]; then
+            echo "Munge did not become ready"
+            return 1
+        fi
+        retries=$((retries - 1))
+        sleep 1
+    done
+    echo "Munge is ready"
 }
 
 # $NONUSE can be set to include postgres, cron, proftp, reports, nodejs, condor, slurmd, slurmctld,
@@ -344,6 +409,10 @@ function start_supervisor {
     fi
 
     if [[ ! -z $SUPERVISOR_MANAGE_SLURM ]]; then
+        echo "Starting munge"
+        supervisorctl start munge
+        wait_for_munge || true
+
         if [[ $NONUSE != *"slurmctld"* ]]
         then
             echo "Starting slurmctld"
@@ -354,8 +423,12 @@ function start_supervisor {
             echo "Starting slurmd"
             supervisorctl start slurmd
         fi
-        supervisorctl start munge
     else
+        echo "Starting munge"
+        mkdir -p /var/run/munge && chown -R root:root /var/run/munge
+        /usr/sbin/munged -f -F --num-threads="${MUNGE_NUM_THREADS:-2}" &
+        wait_for_munge || true
+
         if [[ $NONUSE != *"slurmctld"* ]]
         then
             echo "Starting slurmctld"
@@ -366,9 +439,6 @@ function start_supervisor {
             echo "Starting slurmd"
             /usr/sbin/slurmd -L $GALAXY_LOGS_DIR/slurmd.log
         fi
-
-        # We need to run munged regardless
-        mkdir -p /var/run/munge && /usr/sbin/munged -f
     fi
 
     if [[ ! -z $SUPERVISOR_MANAGE_RABBITMQ ]]; then
@@ -475,8 +545,13 @@ if [[ ! -z $SUPERVISOR_POSTGRES_AUTOSTART ]]; then
 fi
 
 if $PRIVILEGED; then
-    # in privileged mode autofs and CVMFS is available
-    export GALAXY_CONFIG_TOOL_DATA_TABLE_CONFIG_PATH="$GALAXY_CONFIG_TOOL_DATA_TABLE_CONFIG_PATH,/cvmfs/data.galaxyproject.org/byhand/location/tool_data_table_conf.xml,/cvmfs/data.galaxyproject.org/managed/location/tool_data_table_conf.xml"
+    # In privileged mode autofs and CVMFS may be available, so only append existing files.
+    if [[ -f /cvmfs/data.galaxyproject.org/byhand/location/tool_data_table_conf.xml ]]; then
+        export GALAXY_CONFIG_TOOL_DATA_TABLE_CONFIG_PATH="${GALAXY_CONFIG_TOOL_DATA_TABLE_CONFIG_PATH},/cvmfs/data.galaxyproject.org/byhand/location/tool_data_table_conf.xml"
+    fi
+    if [[ -f /cvmfs/data.galaxyproject.org/managed/location/tool_data_table_conf.xml ]]; then
+        export GALAXY_CONFIG_TOOL_DATA_TABLE_CONFIG_PATH="${GALAXY_CONFIG_TOOL_DATA_TABLE_CONFIG_PATH},/cvmfs/data.galaxyproject.org/managed/location/tool_data_table_conf.xml"
+    fi
 
     echo "Enable Galaxy Interactive Tools."
     export GALAXY_CONFIG_INTERACTIVETOOLS_ENABLE=True
@@ -489,7 +564,8 @@ if $PRIVILEGED; then
 
     if [[ -z $DOCKER_PARENT ]]; then
         #build the docker in docker environment
-        bash /root/cgroupfs_mount.sh
+        # Ensure cgroup mounts are set up without triggering dind "no command" warnings.
+        bash /root/cgroupfs_mount.sh true
         start_supervisor
         start_gravity
         supervisorctl start docker

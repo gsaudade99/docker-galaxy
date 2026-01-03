@@ -5,7 +5,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
     # - name: Cleanup to only use compose
     #   run: rm -R docs galaxy test
     - name: Run shellcheck with reviewdog

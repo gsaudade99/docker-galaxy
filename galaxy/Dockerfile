@@ -9,13 +9,13 @@
 # * the playbooks are not cleaning anything up
 #
 
-FROM buildpack-deps:22.04 AS build_base
+FROM buildpack-deps:24.04 AS build_base
 
 ENV GALAXY_ROOT_DIR=/galaxy \
     GALAXY_VIRTUAL_ENV=/galaxy_venv \
     GALAXY_HOME=/home/galaxy \
     GALAXY_CONDA_PREFIX=/tool_deps/_conda \
-    MINIFORGE_VERSION=24.3.0-0
+    MINIFORGE_VERSION=25.11.0-1
 
 
 # Install miniforge and then virtualenv from conda
@@ -31,7 +31,7 @@ RUN curl -s -L https://github.com/conda-forge/miniforge/releases/download/$MINIF
     && echo "conda activate base" >> $GALAXY_HOME/.bashrc \
     && export PATH=$GALAXY_CONDA_PREFIX/bin/:$PATH \
     && conda config --add channels bioconda \
-    && conda install virtualenv pip ephemeris \
+    && conda install -y virtualenv pip ephemeris "galaxy-tool-util>=24.1" \
     && conda clean --packages -t -i \
     && cp -r ~/.conda $GALAXY_HOME && cp ~/.condarc $GALAXY_HOME \
     && find $GALAXY_CONDA_PREFIX -name '*.pyc' -delete
@@ -39,29 +39,84 @@ RUN curl -s -L https://github.com/conda-forge/miniforge/releases/download/$MINIF
 
 FROM build_base AS build_galaxy
 
-ARG GALAXY_RELEASE=release_24.1
+ARG GALAXY_RELEASE=release_25.1
 ARG GALAXY_REPO=https://github.com/galaxyproject/galaxy
 
-ENV NODE_OPTIONS=--max-old-space-size=4096
+ENV NODE_OPTIONS=--max-old-space-size=4096 \
+    UV_INSTALL_DIR=/usr/local/bin
+
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
 COPY --from=build_miniforge /tool_deps /tool_deps
 
-RUN mkdir $GALAXY_ROOT_DIR $GALAXY_VIRTUAL_ENV \
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.npm \
+    --mount=type=cache,target=/root/.cache/yarn \
+    mkdir $GALAXY_ROOT_DIR $GALAXY_VIRTUAL_ENV \
     # download latest stable release of Galaxy.
     && curl -L -s $GALAXY_REPO/archive/$GALAXY_RELEASE.tar.gz | tar xzf - --strip-components=1 -C $GALAXY_ROOT_DIR \
-    && PATH=$GALAXY_CONDA_PREFIX/bin/:$PATH virtualenv $GALAXY_VIRTUAL_ENV \
+    && uv venv --seed $GALAXY_VIRTUAL_ENV \
     # Install galaxy client
-    && cd $GALAXY_ROOT_DIR && ./scripts/common_startup.sh \
-    && . $GALAXY_VIRTUAL_ENV/bin/activate \
-    && pip install "weasyprint>=61.2" watchdog --index-url https://wheels.galaxyproject.org/simple --extra-index-url https://pypi.python.org/simple \
-    && deactivate \
+    && cd $GALAXY_ROOT_DIR && NPM_CONFIG_CACHE=/root/.npm YARN_CACHE_FOLDER=/root/.cache/yarn ./scripts/common_startup.sh \
+    && uv pip install --python $GALAXY_VIRTUAL_ENV/bin/python "weasyprint>=61.2" watchdog \
+    --index-url https://wheels.galaxyproject.org/simple --extra-index-url https://pypi.python.org/simple \
     # cleanup
     && find config \( -name 'node_modules' -o -name '.cache' -o -name '.parcel-cache' \) -type d -prune -exec rm -rf '{}' + \
     && find $GALAXY_ROOT_DIR -name '*.pyc' -delete && find $GALAXY_VIRTUAL_ENV -name '*.pyc' -delete \ 
     && rm -rf $GALAXY_ROOT_DIR/client/node_modules/ $GALAXY_VIRTUAL_ENV/src/
 
+# This is need for gridengine to work with galaxy
+# https://github.com/galaxyproject/galaxy/issues/10425
+RUN cd / \
+    && curl -L -o jemalloc-5.3.0.tar.gz https://github.com/jemalloc/jemalloc/archive/5.3.0.tar.gz \
+    && tar -xvzf jemalloc-5.3.0.tar.gz \
+    && cd jemalloc-5.3.0 \
+    && ./autogen.sh && ./configure --disable-initial-exec-tls \
+    && make -j 4 && make install
 
-FROM ubuntu:22.04 AS galaxy_cluster_base
+
+# TEMPORARY SLURM-DRMAA SOURCE BUILD
+# - Slurm 24.11 is required for Ubuntu 24.04 in this image, but the natefoo
+#   slurm-drmaa PPA only ships binaries built against Ubuntu's Slurm 23.11.
+# - That mismatch breaks DRMAA at runtime (libslurm ABI/plugin version errors).
+# - Until a 24.11-compatible slurm-drmaa package exists, we build it here from
+#   source in a dedicated stage and only copy the runtime library into the
+#   final image.
+FROM build_base AS build_slurm_drmaa
+
+ARG SLURM_DRMAA_VERSION=1.1.5
+
+RUN apt-get -qq update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        git \
+        autoconf \
+        automake \
+        bison \
+        flex \
+        gperf \
+        ragel \
+        libtool \
+        pkg-config \
+        software-properties-common \
+        dirmngr \
+        gpg \
+        gpg-agent \
+    && add-apt-repository ppa:ubuntu-hpc/slurm-wlm-24.11 \
+    && apt-get -qq update \
+    && apt-get install -y --no-install-recommends libslurm-dev slurm-wlm \
+    && git clone --branch "$SLURM_DRMAA_VERSION" --depth 1 --recurse-submodules --shallow-submodules \
+        https://github.com/natefoo/slurm-drmaa.git /tmp/slurm-drmaa \
+    && cd /tmp/slurm-drmaa \
+    && ./autogen.sh \
+    && ./configure --prefix=/usr/local \
+    && make -j"$(nproc)" \
+    && make install \
+    && mkdir -p /out \
+    && cp -a /usr/local/lib/libdrmaa.so* /out/ \
+    && rm -rf /var/lib/apt/lists/* /tmp/slurm-drmaa
+
+FROM ubuntu:24.04 AS galaxy_cluster_base
 
 ENV GALAXY_ROOT_DIR=/galaxy \
     GALAXY_VIRTUAL_ENV=/galaxy_venv \
@@ -89,14 +144,17 @@ ENV GALAXY_CONFIG_FILE=$GALAXY_CONFIG_DIR/galaxy.yml \
     PG_CONF_DIR_DEFAULT=/etc/postgresql/$PG_VERSION/main/ \
     PG_DATA_DIR_HOST=$EXPORT_DIR/postgresql/$PG_VERSION/main/
 
-ADD --chmod=755 ./common_cleanup.sh /usr/bin/common_cleanup.sh
+ENV UV_INSTALL_DIR=/usr/local/bin
+
+ADD ./common_cleanup.sh /usr/bin/common_cleanup.sh
 
 RUN echo "force-unsafe-io" > /etc/dpkg/dpkg.cfg.d/02apt-speedup \
     && echo "Acquire::http {No-Cache=True;};" > /etc/apt/apt.conf.d/no-cache \
     && echo 'APT::Install-Recommends "0";' > /etc/apt/apt.conf.d/99no-install-recommends \
-    && apt-get -qq update && apt-get install -y locales \
+    && apt-get -qq update && apt-get install -y locales curl \
     && locale-gen en_US.UTF-8 && dpkg-reconfigure locales \
     && apt-get autoremove -y && apt-get clean \
+    && chmod 755 /usr/bin/common_cleanup.sh \
     && /usr/bin/common_cleanup.sh
 
 ADD ansible/ /ansible/
@@ -104,27 +162,41 @@ ADD ansible/ /ansible/
 # Install ansible and other dependencies
 RUN apt-get -qq update \
     && apt install -y software-properties-common dirmngr gpg gpg-agent \
-    && apt install -y sudo ca-certificates nano git gridengine-common gridengine-drmaa1.0 libswitch-perl \
-    && add-apt-repository ppa:ansible/ansible-7 \
-    && apt install -y ansible \
+    && add-apt-repository ppa:ansible/ansible \
+    # Use the Ubuntu HPC PPA for Slurm 24.11 so libslurm and plugins stay in sync on 24.04.
+    && add-apt-repository ppa:ubuntu-hpc/slurm-wlm-24.11 \
+    && apt-get -qq update \
+    && apt install -y sudo ca-certificates nano git gridengine-common gridengine-drmaa1.0 libswitch-perl nodejs npm \
+    && apt install -y ansible slurm-wlm libslurm42t64 \
     # Make python3 standard
     && update-alternatives --install /usr/bin/python python /usr/bin/python3 10 \
     && apt purge -y software-properties-common systemd && apt-get autoremove -y && apt-get clean \
     # Install ansible roles
     && ansible-galaxy install -r /ansible/requirements.yml -p /ansible/roles \
+    && npm install -g @galaxyproject/gx-it-proxy@latest \
+    && apt-get purge -y npm \
+    && apt-get autoremove -y \
     && groupadd -r $GALAXY_USER -g $GALAXY_GID \
     && useradd -u $GALAXY_UID -r -g $GALAXY_USER -d $GALAXY_HOME -m -c "Galaxy user" --shell /bin/bash $GALAXY_USER \
     # Create the postgres user before apt-get does (with the configured UID/GID) to facilitate sharing $EXPORT_DIR/postgresql with non-Linux hosts
     && groupadd -r postgres -g $GALAXY_POSTGRES_GID \
     && adduser --system --quiet --home /var/lib/postgresql --no-create-home --shell /bin/bash --gecos "" --uid $GALAXY_POSTGRES_UID --gid $GALAXY_POSTGRES_GID postgres \
-    && mkdir -p $GALAXY_ROOT_DIR $GALAXY_VIRTUAL_ENV $GALAXY_CONFIG_DIR $GALAXY_CONFIG_DIR/web $GALAXY_LOGS_DIR $EXPORT_DIR \
+    && mkdir -p $GALAXY_ROOT_DIR $GALAXY_VIRTUAL_ENV $GALAXY_CONFIG_DIR $GALAXY_CONFIG_DIR/web $GALAXY_LOGS_DIR $EXPORT_DIR $EXPORT_DIR/container_cache/singularity/mulled \
     && chown -R $GALAXY_USER:$GALAXY_USER $GALAXY_ROOT_DIR $GALAXY_VIRTUAL_ENV $GALAXY_CONFIG_DIR $GALAXY_LOGS_DIR $EXPORT_DIR \
     && /usr/bin/common_cleanup.sh
 
+COPY --from=build_slurm_drmaa /out/ /usr/lib/slurm-drmaa/lib/
+
+RUN ln -sf /usr/lib/slurm-drmaa/lib/libdrmaa.so.1 /usr/lib/slurm-drmaa/lib/libdrmaa.so \
+    && ldconfig
+
 COPY --chown=$GALAXY_USER:$GALAXY_USER --from=build_miniforge /tool_deps /tool_deps
 
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
 # Install necessary components and dependencies for running Galaxy
-RUN PATH=$GALAXY_CONDA_PREFIX/bin/:$PATH virtualenv $GALAXY_VIRTUAL_ENV \
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv venv --seed $GALAXY_VIRTUAL_ENV \
     && chown -R $GALAXY_USER:$GALAXY_USER $GALAXY_VIRTUAL_ENV \
     && ansible-playbook /ansible/provision.yml \
     --extra-vars galaxy_server_dir=$GALAXY_ROOT_DIR \
@@ -159,7 +231,6 @@ RUN PATH=$GALAXY_CONDA_PREFIX/bin/:$PATH virtualenv $GALAXY_VIRTUAL_ENV \
     && apt purge -y software-properties-common dirmngr gpg gpg-agent && apt-get autoremove -y && apt-get clean \
     && /usr/bin/common_cleanup.sh
 
-
 FROM galaxy_cluster_base AS final
 
 LABEL maintainer="Björn A. Grüning <bjoern.gruening@gmail.com>"
@@ -168,20 +239,23 @@ ENV GALAXY_CONFIG_MANAGED_CONFIG_DIR=$EXPORT_DIR/${GALAXY_ROOT_DIR#/}/database/c
     GALAXY_CONFIG_TOOL_CONFIG_FILE=$GALAXY_CONFIG_DIR/tool_conf.xml \
     GALAXY_CONFIG_TOOL_DATA_TABLE_CONFIG_PATH=$GALAXY_CONFIG_DIR/tool_data_table_conf.xml \
     GALAXY_CONFIG_WATCH_TOOL_DATA_DIR=True \
+    GALAXY_CONFIG_CONTAINER_RESOLVERS_CONFIG_FILE=$GALAXY_CONFIG_DIR/container_resolvers_conf.yml \
     GALAXY_CONFIG_TOOL_DEPENDENCY_DIR=$EXPORT_DIR/tool_deps \
     GALAXY_CONFIG_TOOL_PATH=$EXPORT_DIR/${GALAXY_ROOT_DIR#/}/tools \
     GALAXY_DEFAULT_ADMIN_USER=admin \
-    GALAXY_DEFAULT_ADMIN_EMAIL=admin@galaxy.org \
+    GALAXY_DEFAULT_ADMIN_EMAIL=admin@example.org \
     GALAXY_DEFAULT_ADMIN_PASSWORD=password \
     GALAXY_DEFAULT_ADMIN_KEY=fakekey \
     GALAXY_DESTINATIONS_DEFAULT=slurm_cluster \
     GALAXY_RUNNERS_ENABLE_SLURM=True \
     GALAXY_RUNNERS_ENABLE_CONDOR=False \
     GALAXY_CONFIG_DATABASE_CONNECTION=postgresql://galaxy:galaxy@localhost:5432/galaxy?client_encoding=utf8 \
-    GALAXY_CONFIG_ADMIN_USERS=admin@galaxy.org \
+    GALAXY_CONFIG_ADMIN_USERS=admin@example.org \
     GALAXY_CONFIG_BOOTSTRAP_ADMIN_API_KEY=HSNiugRFvgT574F43jZ7N9F3 \
     GALAXY_CONFIG_BRAND="Galaxy Docker Build" \
     GALAXY_CONFIG_STATIC_ENABLED=False \
+    GALAXY_CONFIG_FILE_SOURCE_TEMPPLATES=$GALAXY_CONFIG_DIR/file_source_templates.yml \
+    GALAXY_CONFIG_VAULT_CONFIG_FILE=$GALAXY_CONFIG_DIR/vault_conf.yml \
     GALAXY_INTERACTIVE_TOOLS_CONFIG_FILE=$GALAXY_CONFIG_DIR/tool_conf_interactive.xml \
     # The following ENV var can be used to set the number of gunicorn workers
     GUNICORN_WORKERS=2 \
@@ -200,6 +274,7 @@ ENV GALAXY_CONFIG_MANAGED_CONFIG_DIR=$EXPORT_DIR/${GALAXY_ROOT_DIR#/}/database/c
 
 COPY --chown=$GALAXY_USER:$GALAXY_USER --from=build_galaxy $GALAXY_ROOT_DIR $GALAXY_ROOT_DIR
 COPY --chown=$GALAXY_USER:$GALAXY_USER --from=build_galaxy $GALAXY_VIRTUAL_ENV $GALAXY_VIRTUAL_ENV
+COPY --chown=root:root --from=build_galaxy /usr/local/lib/libjemalloc.so.2 /usr/local/lib/libjemalloc.so.2
 COPY --chown=$GALAXY_USER:$GALAXY_USER --from=build_miniforge $GALAXY_HOME $GALAXY_HOME
 COPY --chown=$GALAXY_USER:$GALAXY_USER --from=build_miniforge /etc/profile.d/conda.sh /etc/profile.d/conda.sh
 
@@ -216,10 +291,37 @@ RUN mkdir -p $GALAXY_CONFIG_TUS_UPLOAD_STORE \
     && cp $GALAXY_HOME/.bashrc ~/ \
     && su $GALAXY_USER -c "cp $GALAXY_ROOT_DIR/config/galaxy.yml.sample $GALAXY_CONFIG_FILE" \
     && su $GALAXY_USER -c "cp $GALAXY_ROOT_DIR/config/tool_conf.xml.sample $GALAXY_CONFIG_TOOL_CONFIG_FILE" \
+    && ansible-playbook /ansible/galaxy_job_conf.yml \
+    --extra-vars galaxy_server_dir=$GALAXY_ROOT_DIR \
+    --extra-vars galaxy_config_dir=$GALAXY_CONFIG_DIR \
+    --extra-vars galaxy_config_file=$GALAXY_CONFIG_FILE \
+    --extra-vars galaxy_job_conf_path=$GALAXY_CONFIG_JOB_CONFIG_FILE \
+    --extra-vars galaxy_container_resolvers_conf_path=$GALAXY_CONFIG_CONTAINER_RESOLVERS_CONFIG_FILE \
+    --extra-vars galaxy_user_name=$GALAXY_USER \
     && curl -o $GALAXY_CONFIG_TOOL_DATA_TABLE_CONFIG_PATH \
     -L https://raw.githubusercontent.com/galaxyproject/usegalaxy-playbook/8adb1f82c94fe95b09df2a2816440ce2420b7d39/env/main/files/galaxy/config/tool_data_table_conf.xml \
-    && chown $GALAXY_USER:$GALAXY_USER $GALAXY_CONFIG_DIR/reports.yml $GALAXY_HOME/ephemeris/sample_tool_list.yaml $GALAXY_INTERACTIVE_TOOLS_CONFIG_FILE $GALAXY_CONFIG_TOOL_DATA_TABLE_CONFIG_PATH \
-    && chmod 0644 $GALAXY_CONFIG_DIR/reports.yml $GALAXY_HOME/ephemeris/sample_tool_list.yaml $GALAXY_INTERACTIVE_TOOLS_CONFIG_FILE $GALAXY_CONFIG_TOOL_DATA_TABLE_CONFIG_PATH
+    && chown $GALAXY_USER:$GALAXY_USER $GALAXY_CONFIG_TOOL_DATA_TABLE_CONFIG_PATH \
+    # Ensure Galaxy uses the jemalloc we built (gridengine compatibility: #10425).
+    && mv /usr/lib/x86_64-linux-gnu/libjemalloc.so.2 /usr/lib/x86_64-linux-gnu/libjemalloc.so.2.orig \
+    && ln -s /usr/local/lib/libjemalloc.so.2 /usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+
+# Install optional Galaxy dependencies for the default config during build.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    : ${GALAXY_WHEELS_INDEX_URL:="https://wheels.galaxyproject.org/simple"} \
+    : ${PYPI_INDEX_URL:="https://pypi.python.org/simple"} \
+    && optional_deps_file="$(mktemp)" \
+    && PYTHONPATH=$GALAXY_ROOT_DIR/lib $GALAXY_VIRTUAL_ENV/bin/python \
+        -c "from galaxy.dependencies import optional; print('\n'.join(optional('/etc/galaxy/galaxy.yml')))" \
+        > "$optional_deps_file" \
+    && if [ -s "$optional_deps_file" ]; then \
+        /usr/local/bin/uv pip install \
+            --python "$GALAXY_VIRTUAL_ENV/bin/python" \
+            --index-url "${GALAXY_WHEELS_INDEX_URL}" \
+            --extra-index-url "${PYPI_INDEX_URL}" \
+            -r "$optional_deps_file"; \
+    fi \
+    && rm -f "$optional_deps_file" \
+    && chown -R $GALAXY_USER:$GALAXY_USER $GALAXY_VIRTUAL_ENV
 
 # Include all needed scripts from the host
 ADD ./setup_postgresql.py /usr/local/bin/setup_postgresql.py
@@ -227,7 +329,7 @@ ADD ./setup_postgresql.py /usr/local/bin/setup_postgresql.py
 # Configure PostgreSQL
 # 1. Remove all old configuration
 # 2. Create DB-user 'galaxy' with password 'galaxy' in database 'galaxy'
-# 3. Create Galaxy Admin User 'admin@galaxy.org' with password 'admin' and API key 'admin'
+# 3. Create Galaxy Admin User 'admin@example.org' with password 'admin' and API key 'admin'
 
 RUN cd / \
     && rm $PG_DATA_DIR_DEFAULT -rf \
@@ -246,7 +348,7 @@ ENV GALAXY_CONFIG_JOB_WORKING_DIRECTORY=$EXPORT_DIR/${GALAXY_ROOT_DIR#/}/databas
     GALAXY_CONFIG_TEMPLATE_CACHE_PATH=$EXPORT_DIR/${GALAXY_ROOT_DIR#/}/database/compiled_templates \
     GALAXY_CONFIG_CITATION_CACHE_DATA_DIR=$EXPORT_DIR/${GALAXY_ROOT_DIR#/}/database/citations/data \
     GALAXY_CONFIG_FTP_UPLOAD_DIR=$EXPORT_DIR/ftp \
-    GALAXY_CONFIG_FTP_UPLOAD_SITE=galaxy.docker.org \
+    GALAXY_CONFIG_FTP_UPLOAD_SITE=example.org \
     GALAXY_CONFIG_USE_PBKDF2=True \
     GALAXY_CONFIG_NGINX_X_ACCEL_REDIRECT_BASE=/_x_accel_redirect \
     GALAXY_CONFIG_DYNAMIC_PROXY_MANAGE=False \
@@ -258,7 +360,8 @@ ENV GALAXY_CONFIG_JOB_WORKING_DIRECTORY=$EXPORT_DIR/${GALAXY_ROOT_DIR#/}/databas
     GALAXY_CONFIG_ENABLE_QUOTAS=True \
     GALAXY_CONFIG_GALAXY_INFRASTRUCTURE_URL=http://$GALAXY_DOMAIN \
     GALAXY_CONFIG_OUTPUTS_TO_WORKING_DIRECTORY=True \
-    GALAXY_CONDA_PREFIX=$GALAXY_CONFIG_TOOL_DEPENDENCY_DIR/_conda
+    GALAXY_CONDA_PREFIX=$GALAXY_CONFIG_TOOL_DEPENDENCY_DIR/_conda \
+    DRMAA_LIBRARY_PATH=/usr/lib/slurm-drmaa/lib/libdrmaa.so
 
 # Container Style
 ADD --chown=$GALAXY_USER:$GALAXY_USER GalaxyDocker.png $GALAXY_CONFIG_DIR/web/welcome_image.png
@@ -271,17 +374,15 @@ ADD --chown=$GALAXY_USER:$GALAXY_USER ./tool_sheds_conf.xml $GALAXY_HOME/tool_sh
 
 # Script that enables easier downstream installation of tools (e.g. for different Galaxy Docker flavours)
 ADD install_tools_wrapper.sh /usr/bin/install-tools
-# script to install BioJS visualizations
-ADD install_biojs_vis.sh /usr/bin/install-biojs
-RUN chmod +x /usr/bin/install-tools /usr/bin/install-biojs && \
+RUN chmod +x /usr/bin/install-tools && \
     cd /usr/bin/ && curl https://git.embl.de/grp-gbcs/galaxy-dir-sync/raw/master/src/galaxy-dir-sync.py > galaxy-dir-sync.py && \
     chmod +x galaxy-dir-sync.py
 
 # use https://github.com/krallin/tini/ as tiny but valid init and PID 1
 ADD https://github.com/krallin/tini/releases/download/v0.18.0/tini /sbin/tini
-RUN chmod +x /sbin/tini
-
-ADD --chown=$GALAXY_USER:$GALAXY_USER --chmod=755 ./run.sh $GALAXY_ROOT_DIR/run.sh
+ADD --chown=$GALAXY_USER:$GALAXY_USER ./run.sh $GALAXY_ROOT_DIR/run.sh
+RUN chmod +x /sbin/tini \
+    && chmod 755 ./run.sh $GALAXY_ROOT_DIR/run.sh
 
 # This needs to happen here and not above, otherwise the Galaxy start
 # (without running the startup.sh script) will crash because integrated_tool_panel.xml could not be found.
@@ -298,6 +399,7 @@ EXPOSE 9002
 VOLUME ["/export/", "/data/", "/var/lib/docker"]
 
 ADD startup.sh /usr/bin/startup
+ADD startup2.sh /usr/bin/startup2
 ENV SUPERVISOR_POSTGRES_AUTOSTART=False \
     SUPERVISOR_MANAGE_POSTGRES=True \
     SUPERVISOR_MANAGE_CRON=True \

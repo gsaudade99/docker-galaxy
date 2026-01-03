@@ -2,8 +2,9 @@
   connection: local
   remote_user: root
   vars:
-    htcondor_version: 23.x
-    htcondor_channel: current
+    htcondor_version: 25.x
+    htcondor_keyring_path: /etc/apt/keyrings/htcondor.asc
+    htcondor_repo_list_path: /etc/apt/sources.list.d/htcondor.list
     htcondor_role_submit: true
     htcondor_password: changeme
     htcondor_domain: '{{ galaxy_user_name }}'
@@ -44,10 +45,42 @@
     - name: Register HTCondor init script
       command: update-rc.d condor defaults
 
-  roles:
-    - role: grycap.htcondor
-
   tasks:
+    - name: Install HTCondor repository prerequisites
+      apt:
+        name:
+          - curl
+          - gnupg
+          - apt-transport-https
+        state: present
+        update_cache: true
+
+    - name: Ensure APT keyring directory exists
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Add HTCondor signing key
+      get_url:
+        url: "https://htcss-downloads.chtc.wisc.edu/repo/keys/HTCondor-{{ htcondor_version }}-Key"
+        dest: "{{ htcondor_keyring_path }}"
+        mode: "0644"
+
+    - name: Configure HTCondor apt repository
+      copy:
+        dest: "{{ htcondor_repo_list_path }}"
+        content: |
+          # HTCondor repository for the {{ htcondor_version }} feature versions
+          deb [signed-by={{ htcondor_keyring_path }}] https://htcss-downloads.chtc.wisc.edu/repo/ubuntu/{{ htcondor_version }} {{ ansible_distribution_release }} main
+          deb-src [signed-by={{ htcondor_keyring_path }}] https://htcss-downloads.chtc.wisc.edu/repo/ubuntu/{{ htcondor_version }} {{ ansible_distribution_release }} main
+
+    - name: Install HTCondor
+      apt:
+        name: condor
+        state: present
+        update_cache: true
+
     - name: Create log files for HTCondor
       file:
         path: "/var/log/condor/{{ item }}"

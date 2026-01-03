@@ -1,21 +1,22 @@
 FROM alpine:3.17 as build
 
-ENV BIOBLEND_VERSION=1.3.0 \
+ENV BIOBLEND_VERSION=1.7.0 \
     TOX_ENV=py310 \
     BIOBLEND_GALAXY_API_KEY=fakekey \
     BIOBLEND_GALAXY_URL=http://galaxy \
     BIOBLEND_TEST_JOB_TIMEOUT="240" \
-    GALAXY_VERSION=release_24.1
+    GALAXY_VERSION=release_25.1 \
+    UV_INSTALL_DIR=/usr/local/bin
 
 ADD "https://github.com/galaxyproject/bioblend/archive/v$BIOBLEND_VERSION.zip" /src/bioblend.zip
-RUN apk update && apk add curl python3-dev unzip \
-    && python3 -m ensurepip --upgrade \
-    && pip3 install pep8 tox "aiohttp==3.10.9" \
+RUN apk update && apk add bash curl python3-dev unzip \
+    && curl -LsSf https://astral.sh/uv/install.sh | bash \
+    && uv pip install --system pep8 tox \
     && cd /src \
     && unzip bioblend.zip && rm bioblend.zip \
     && mv "bioblend-$BIOBLEND_VERSION" bioblend \
     && cd bioblend \
-    && python3 setup.py install
+    && uv pip install --system .
 
 WORKDIR /src/bioblend
 

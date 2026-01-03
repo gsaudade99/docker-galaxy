@@ -23,7 +23,7 @@ RUN mkdir "${GALAXY_ROOT_DIR}" \
 
 FROM $DOCKER_REGISTRY/$DOCKER_REGISTRY_USERNAME/galaxy-container-base:$IMAGE_TAG as final
 
-ENV DEBIAN_FRONTEND noninteractive
+ENV DEBIAN_FRONTEND=noninteractive
 
 ENV GALAXY_USER=galaxy \
     GALAXY_GROUP=galaxy \
