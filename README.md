@@ -1013,11 +1013,20 @@ dive <your-docker-image-name>
 
 The list below summarizes the non-compose CI coverage for the main Galaxy image.
 
-| Test | Location | Coverage |
-| --- | --- | --- |
-| Lint | `.github/workflows/lint.yml` | Shellcheck + hadolint |
-| Single container smoke | `.github/workflows/single_container.yml` (runs `.github/workflows/single.sh`) | Build image, `/export` mount, Galaxy API ready, HTTPS self-signed check, SFTP upload (FTP passive is skipped), CVMFS autofs mount, SLURM job test (`test/slurm/test.sh`), BioBlend tests (`test/bioblend/test.sh`), image analysis (dive) |
-| Grid Engine (SGE) | `test/gridengine/test.sh` | Manual/optional test when SGE regressions are suspected |
+* Lint
+  * `.github/workflows/lint.yml`
+  * Shellcheck + hadolint 
+* Container testing
+  * `.github/workflows/single_container.yml` (runs `.github/workflows/single.sh`)
+  * Build image, `/export` mount
+  * Galaxy API ready
+  * HTTPS self-signed check
+  * SFTP upload (FTP passive is skipped)
+  * CVMFS autofs mount
+  * SLURM job test (`test/slurm/test.sh`)
+  * BioBlend tests (`test/bioblend/test.sh`)
+  * image (size) analysis (dive)
+  * Grid Engine (SGE) (`test/gridengine/test.sh`)
 
 ## CI Bot Commands <a name="CI-Bot-Commands" /> [[toc]](#toc)
 
