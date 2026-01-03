@@ -48,6 +48,14 @@
 
   # Required for sftp server
   pre_tasks:
+    - name: Install ProFTPD module packages
+      apt:
+        name:
+          - proftpd-mod-crypto
+          - proftpd-mod-pgsql
+        state: present
+        update_cache: true
+
     - name: Install OpenSSH client package
       apt: pkg=openssh-client
 

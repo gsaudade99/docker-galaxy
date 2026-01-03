@@ -6,7 +6,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Set image tag
         id: image_tag
         run: |
@@ -30,6 +30,8 @@ jobs:
             set +e
             docker buildx build  \
             --output "type=image,name=${{ secrets.docker_registry }}/${{ secrets.docker_registry_username }}/$image_name:${{ steps.image_tag.outputs.image_tag }},push=true" \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
             --build-arg IMAGE_TAG=${{ steps.image_tag.outputs.image_tag }} \
             --build-arg DOCKER_REGISTRY=${{ secrets.docker_registry }} \
             --build-arg DOCKER_REGISTRY_USERNAME=${{ secrets.docker_registry_username }} \
@@ -42,7 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Set image tag
         id: image_tag
         run: |
@@ -66,6 +68,8 @@ jobs:
             set +e
             docker buildx build  \
             --output "type=image,name=${{ secrets.docker_registry }}/${{ secrets.docker_registry_username }}/$image_name:${{ steps.image_tag.outputs.image_tag }},push=true" \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
             --build-arg IMAGE_TAG=${{ steps.image_tag.outputs.image_tag }} \
             --build-arg DOCKER_REGISTRY=${{ secrets.docker_registry }} \
             --build-arg DOCKER_REGISTRY_USERNAME=${{ secrets.docker_registry_username }} \
@@ -96,7 +100,7 @@ jobs:
       fail-fast: false
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Set image tag
         id: image_tag
         run: |
@@ -118,6 +122,8 @@ jobs:
             set +e
             docker buildx build \
             --output "type=image,name=${{ secrets.docker_registry }}/${{ secrets.docker_registry_username }}/${{ matrix.image.name }}:${{ steps.image_tag.outputs.image_tag }},push=true" \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
             --build-arg IMAGE_TAG=${{ steps.image_tag.outputs.image_tag }} \
             --build-arg DOCKER_REGISTRY=${{ secrets.docker_registry }} \
             --build-arg DOCKER_REGISTRY_USERNAME=${{ secrets.docker_registry_username }} \
@@ -206,7 +212,7 @@ jobs:
         if: contains(matrix.infrastructure.exclude_test, matrix.test.name) != true
         run: echo "run=true" >> $GITHUB_OUTPUT
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Set image tag in env
         run: echo "IMAGE_TAG=${GITHUB_REF#refs/heads/}" >> $GITHUB_ENV
       - name: Master branch - Set image to to 'latest'
@@ -256,7 +262,7 @@ jobs:
         if: failure()
         run: sudo chmod -R +r ./compose/export/galaxy/database
       - name: Save artifacts for debugging a failed test
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: failure()
         with:
           name: ${{ matrix.infrastructure.name }}_${{ matrix.test.name }}_first-run
@@ -302,7 +308,7 @@ jobs:
         if: failure() && matrix.test.second_run == 'true'
         run: sudo chmod -R +r ./compose/export/galaxy/database
       - name: Save artifacts for debugging a failed test
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: failure() && matrix.test.second_run == 'true'
         with:
           name: ${{ matrix.infrastructure.name }}_${{ matrix.test.name }}_second-run

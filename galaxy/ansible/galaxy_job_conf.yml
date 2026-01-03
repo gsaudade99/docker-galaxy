@@ -2,6 +2,18 @@
   connection: local
   remote_user: root
   tasks:
+    - name: "Ensure dynamic handler assignment method is configured"
+      lineinfile:
+        path: "{{ galaxy_config_file }}"
+        regexp: '^job_handler_assignment_method:'
+        line: 'job_handler_assignment_method: db-skip-locked'
+        insertafter: EOF
+        create: true
+        owner: "{{ galaxy_user_name }}"
+        group: "{{ galaxy_user_name }}"
+        mode: "0644"
+      when: galaxy_dynamic_handlers | bool
+
     - name: "Install Galaxy job conf"
       template: src=job_conf.xml.j2 dest={{ galaxy_job_conf_path }} owner={{ galaxy_user_name }} group={{ galaxy_user_name }}
 

@@ -1,18 +1,25 @@
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
-ENV DEBIAN_FRONTEND noninteractive
+ENV DEBIAN_FRONTEND=noninteractive
+ENV UV_INSTALL_DIR=/usr/local/bin
 
 RUN apt-get update -qq && apt-get install -y --no-install-recommends \
-    slurmd slurmctld \
-    python3-psutil supervisor virtualenv samtools apt-transport-https software-properties-common curl sudo gpg-agent && \
+    munge \
+    python3-psutil supervisor samtools apt-transport-https software-properties-common dirmngr gpg curl sudo gpg-agent && \
+    add-apt-repository ppa:ubuntu-hpc/slurm-wlm-24.11 && \
+    apt-get update -qq && \
+    apt-get install -y slurm-wlm && \
+    curl -LsSf https://astral.sh/uv/install.sh | sh && \
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add - && \
     add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" && \
     apt update && \
     apt install -y docker-ce && \
+    cd / && \
+    ldconfig && \
     apt-get autoremove -y && apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && rm -rf ~/.cache/ && \
-    adduser galaxy &&\
-    touch /var/log/slurm/slurmctld.log /var/log/slurm/slurmd.log &&\
-    mkdir /tmp/slurm
+    adduser --disabled-password --gecos "" galaxy &&\
+    mkdir -p /var/log/slurm /tmp/slurm && \
+    touch /var/log/slurm/slurmctld.log /var/log/slurm/slurmd.log
 
 ADD configure_slurm.py /usr/local/bin/configure_slurm.py
 ADD munge.conf /etc/default/munge

@@ -9,7 +9,7 @@ RUN apt update && apt install --no-install-recommends gnupg2 curl -y \
     && /usr/bin/common_cleanup.sh
 
 # Install HTCondor
-ENV DEBIAN_FRONTEND noninteractive
+ENV DEBIAN_FRONTEND=noninteractive
 RUN curl -fsSL https://research.cs.wisc.edu/htcondor/repo/keys/HTCondor-current-Key | apt-key add - \
     && echo "deb https://research.cs.wisc.edu/htcondor/repo/ubuntu/current jammy main" >> /etc/apt/sources.list \
     && apt update && apt install --no-install-recommends htcondor -y \

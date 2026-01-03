@@ -14,7 +14,7 @@ One of the main goals is to make access to entire tool suites as easy as possibl
 this includes the setup of a public available web-service that needs to be maintained, or that the Tool-user needs to either setup a Galaxy Server by its own or to have Admin access to a local Galaxy server.
 With docker, tool developers can create their own Image with all dependencies and the user only needs to run it within docker.
 
-The Image is based on [Ubuntu 22.04 LTS](http://releases.ubuntu.com/22.04/) and all recommended Galaxy requirements are installed. The following chart should illustrate the [Docker](http://www.docker.io) image hierarchy we have build to make is as easy as possible to build on different layers of our stack and create many exciting Galaxy flavors.
+The Image is based on [Ubuntu 24.04 LTS](http://releases.ubuntu.com/24.04/) and all recommended Galaxy requirements are installed. The following chart should illustrate the [Docker](http://www.docker.io) image hierarchy we have build to make is as easy as possible to build on different layers of our stack and create many exciting Galaxy flavors.
 
 ![Docker hierarchy](https://raw.githubusercontent.com/bgruening/docker-galaxy-stable/master/chart.png)
 
@@ -114,6 +114,10 @@ With the additional `-v /home/user/galaxy_storage/:/export/` parameter, Docker w
 - In case of a non-empty `/export/`, for example if you continue a previous session within the same folder, nothing will be moved, but the symlinks will be created.
 
 This enables you to have different export folders for different sessions - means real separation of your different projects.
+
+To detect when the Galaxy distribution in the image changes, the container writes a marker at
+`/export/.galaxy_export_marker`. You can override the marker value with `GALAXY_EXPORT_MARKER` if you
+need deterministic export refresh behavior.
 
 You can also collect and store `/export/` data of Galaxy instances in a dedicated docker [Data  volume Container](https://docs.docker.com/engine/userguide/dockervolumes/) created by:
 
@@ -517,7 +521,16 @@ This is achieved by connecting to Galaxy's CernVM filesystem (CVMFS) at `cvmfs-c
 The CVMFS capability doesn't add to the size of the Docker image, but when running, CVMFS maintains
 a cache to keep the most recently used data on the local disk.
 
-*Note*: for CVMFS directories to be mounted-on-demand with `autofs`, you must launch Docker as `--privileged`
+*Note*: for CVMFS directories to be mounted-on-demand with `autofs`, you must launch Docker as `--privileged`.
+If privileged mode is not an option, use the optional CVMFS sidecar in `galaxy/docker-compose.yaml`:
+
+```sh
+cd galaxy
+CVMFS_MOUNT_DIR=/cvmfs EXPORT_DIR=./export docker compose --profile cvmfs up
+```
+
+This starts a dedicated CVMFS container that mounts the repositories and shares `/cvmfs` with the Galaxy
+container. The CVMFS cache is persisted in `${EXPORT_DIR}/cvmfs-cache`.
 
 
 ## Personalize your Galaxy <a name="Personalize-your-Galaxy" /> [[toc]](#toc)
@@ -535,7 +548,9 @@ docker run -d -p 8080:80 -p 9002:9002 \
     quay.io/bgruening/galaxy
 ```
 
-A graphical user interface, to start and stop your services, is available on port `9002` if you run your container like above.
+A graphical user interface for starting/stopping services is available on port `9002` if you map it (e.g. `-p 9002:9002`).
+This is the Supervisor web UI and it is unauthenticated by default, so only expose it on trusted networks or adjust the
+Supervisor credentials in the image build.
 
 
 ## Restarting Galaxy <a name="Restarting-Galaxy" /> [[toc]](#toc)
@@ -545,6 +560,15 @@ If you want to restart Galaxy without restarting the entire Galaxy container you
 ```sh
 docker exec <container name> galaxyctl restart
 ```
+
+To restart only web workers or handlers:
+
+```sh
+docker exec <container name> galaxyctl restart gunicorn
+docker exec <container name> galaxyctl restart handler
+```
+
+Use `galaxyctl --help` for service names available in your configuration.
 
 In addition, you can start/stop every supervisord process using a web interface on port `9002`. Start your container with:
 
@@ -719,6 +743,7 @@ This is a very cool feature where Galaxy automatically detects that your tool ha
 To test, install the [IUC bedtools](https://toolshed.g2.bx.psu.edu/repository?repository_id=8d84903cc667dbe7&changeset_revision=7b3aaff0d78c) from the toolshed. When you try to execute *ClusterBed* for example. You may get a missing dependancy error for *bedtools*. But bedtools has an associated docker image on [quay.io](https://quay.io/).  Now configure Galaxy as follows:
 
 - Add this environment variable to `docker run`: `-e GALAXY_CONFIG_ENABLE_MULLED_CONTAINERS=True`
+- Persist mulled Singularity caches by mounting `/export` and reusing `/export/container_cache/singularity/mulled` across runs.
 - In `job_conf.xml` configure a Docker enabled destination as follows:
 
 ```xml
@@ -747,6 +772,7 @@ When you execute the tool again, Galaxy will pull the image from Biocontainers (
 | `LOAD_GALAXY_CONDITIONAL_DEPENDENCIES` | Installing optional dependencies into the Galaxy virtual environment |
 | `LOAD_PYTHON_DEV_DEPENDENCIES` | Installation of Galaxy's dev dependencies. Needs `LOAD_GALAXY_CONDITIONAL_DEPENDENCIES` as well |
 | `GALAXY_AUTO_UPDATE_DB` | Run the Galaxy database migration script during startup |
+| `GALAXY_EXPORT_MARKER` | Override the export marker used to refresh `/export/galaxy`. |
 
 
 # HTTPS Support <a name="HTTPS-Support"/> [[toc]](#toc)
@@ -861,6 +887,32 @@ The data-managers can be configured and specified in a YAML file similar to this
 
 If you host your flavor on GitHub consider to test our build with Travis-CI. This project will help you:
 https://github.com/bgruening/galaxy-flavor-testing
+
+## Test matrix <a name="Test-matrix" /> [[toc]](#toc)
+
+The project includes local test scripts and CI workflows. Use the matrix below to decide what to run.
+
+| Area | Script / Workflow | Requires | Notes |
+| --- | --- | --- | --- |
+| Image build | `docker build -t galaxy:test galaxy/` | Docker | Baseline image build. |
+| Startup sanity | `docker run --rm --privileged galaxy:test /usr/bin/startup2` | Privileged | Confirms services start and CVMFS messaging is sane. |
+| Bioblend | `test/bioblend/test.sh` | Running Galaxy container | Uses a Bioblend test image against Galaxy. |
+| Slurm | `test/slurm/test.sh` | Docker, Slurm test image | Uses external Slurm container; set `GALAXY_IMAGE=galaxy:test` if needed. |
+| SGE (Grid Engine) | `test/gridengine/test.sh` | Docker, SGE test image | Uses ephemeris container to wait for Galaxy. |
+| CVMFS sidecar | `test/cvmfs/test.sh` | Privileged | Builds and validates mount propagation from sidecar. |
+| FTP/SFTP | `.github/workflows/single.sh` | Docker, sshpass (CI) | FTP and SFTP checks run in CI; local run skips SFTP if `sshpass` is missing. |
+| /export persistence | `startup.sh` / `startup2.sh` | `/export` volume | Export and cache relocation happens during startup; exercised by CI runs. |
+| HTTPS/TLS | `.github/workflows/single.sh` | Docker | Uses `curl` and `openssl s_client` against port 443. |
+| Tool install smoke | `.github/workflows/single.sh` | Docker | Installs sample tools and verifies tool availability. |
+| Container resolvers | `test/container_resolvers_conf.ci.yml` | Galaxy container | CI uses a minimal resolver config for toolbox resolution tests. |
+| Image analysis (optional) | `.github/workflows/single.sh` | `dive` | Runs only when `dive` is installed. |
+| Single-container CI | `.github/workflows/single_container.yml` | CI | Full container test (privileged). |
+| Multi-test CI | `.github/workflows/single.sh` | CI | Builds image + runs SLURM, SGE, Bioblend; uses buildx cache. |
+
+Notes:
+- If `/tmp` is small in CI, set `TMPDIR=/var/tmp` for test scripts.
+- CVMFS sidecar CI builds/pushes on tags; branch pushes run tests only when CVMFS paths change.
+
 
 
 

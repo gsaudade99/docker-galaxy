@@ -101,7 +101,7 @@ galaxy_singularity_volumes_from: ""
 # rw directories are not considered if the parent is ro
 galaxy_singularity_volumes : "$defaults"
 
-galaxy_container_resolution: false
+galaxy_container_resolution: true
 container_resolution_explicit: true
 container_resolution_mulled: true
 container_resolution_cached_mulled: "{{ container_resolution_mulled }}"
@@ -349,4 +349,15 @@ cvmfs_keys:
       S5SVemmu6Yb8GkGwLGmMVLYXutuaHdMFyKzWm+qFlG5JRz4okUWERvtJ2QAJPOzL
       mAG1ceyBFowj/r3iJTa+Jcif2uAmZxg+cHkZG5KzATykF82UH1ojUzREMMDcPJi2
       dQIDAQAB
+      -----END PUBLIC KEY-----
+  - path: /etc/cvmfs/keys/galaxyproject.org/data.galaxyproject.org.pub
+    key: |
+      -----BEGIN PUBLIC KEY-----
+      MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA5LHQuKWzcX5iBbCGsXGt
+      6CRi9+a9cKZG4UlX/lJukEJ+3dSxVDWJs88PSdLk+E25494oU56hB8YeVq+W8AQE
+      3LWx2K2ruRjEAI2o8sRgs/IbafjZ7cBuERzqj3Tn5qUIBFoKUMWMSIiWTQe2Sfnj
+      GzfDoswr5TTk7aH/FIXUjLnLGGCOzPtUC244IhHARzu86bWYxQJUw0/kZl5wVGcH
+      maSgr39h1xPst0Vx1keJ95AH0wqxPbCcyBGtF1L6HQlLidmoIDqcCQpLsGJJEoOs
+      NVNhhcb66OJHah5ppI1N3cZehdaKyr1XcF9eedwLFTvuiwTn6qMmttT/tHX7rcxT
+      owIDAQAB
       -----END PUBLIC KEY-----

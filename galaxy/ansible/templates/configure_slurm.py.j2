@@ -1,15 +1,95 @@
 from socket import gethostname
 from os import environ
 import subprocess
+import json
 
 CONFIG_FILE_PATH = "/etc/slurm/slurm.conf"
 
+ENV_MAP = {
+    "CPUs": "SLURM_CPUS",
+    "RealMemory": "SLURM_MEMORY",
+    "Boards": "SLURM_BOARDS",
+    "SocketsPerBoard": "SLURM_SOCKETS_PER_BOARD",
+    "CoresPerSocket": "SLURM_CORES_PER_SOCKET",
+    "ThreadsPerCore": "SLURM_THREADS_PER_CORE",
+}
+
+FORCED_KV = {
+    "ProctrackType": "proctrack/pgid",
+    "TaskPlugin": "task/none",
+    "JobAcctGatherType": "jobacct_gather/none",
+    "MpiDefault": "none",
+}
+
+def _as_int(value):
+    try:
+        return int(str(value).split()[0])
+    except (TypeError, ValueError):
+        return None
+
+def _slurmd_status():
+    try:
+        output = subprocess.check_output(["slurmd", "-C"], stderr=subprocess.DEVNULL).decode("utf-8")
+    except Exception:
+        return {}
+    info = {}
+    for chunk in output.split():
+        if "=" in chunk:
+            key, value = chunk.split("=", 1)
+            info[key] = value
+    return info
+
+def _lscpu_status():
+    try:
+        output = subprocess.check_output(["lscpu", "-J"], stderr=subprocess.DEVNULL).decode("utf-8")
+        data = json.loads(output)
+    except Exception:
+        return {}
+    fields = {}
+    for entry in data.get("lscpu", []):
+        field = entry.get("field", "").strip().strip(":")
+        fields[field] = entry.get("data")
+    cpus = _as_int(fields.get("CPU(s)"))
+    sockets = _as_int(fields.get("Socket(s)"))
+    cores = _as_int(fields.get("Core(s) per socket"))
+    threads = _as_int(fields.get("Thread(s) per core"))
+    info = {}
+    if cpus is not None:
+        info["CPUs"] = str(cpus)
+    if sockets is not None:
+        info["SocketsPerBoard"] = str(sockets)
+    if cores is not None:
+        info["CoresPerSocket"] = str(cores)
+    if threads is not None:
+        info["ThreadsPerCore"] = str(threads)
+    info.setdefault("Boards", "1")
+    return info
+
+def _real_memory_mb():
+    try:
+        with open("/proc/meminfo", "r") as handle:
+            for line in handle:
+                if line.startswith("MemTotal:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(int(parts[1]) / 1024)
+    except Exception:
+        return None
+    return None
+
 def main():
-    slurm_status = subprocess.check_output(['slurmd', '-C']).decode('utf-8')
-    dict_status = dict(z.split('=') for z in slurm_status.split())
-    cpus = dict_status['CPUs']
-    memory = dict_status['RealMemory']
-    mem_per_cpu = int(int(memory) / int(cpus))
+    dict_status = _slurmd_status()
+    for key, value in _lscpu_status().items():
+        dict_status.setdefault(key, value)
+    if "RealMemory" not in dict_status:
+        real_memory = _real_memory_mb()
+        if real_memory is not None:
+            dict_status["RealMemory"] = str(real_memory)
+    cpus = dict_status.get('CPUs')
+    memory = dict_status.get('RealMemory')
+    mem_per_cpu = None
+    if cpus and memory:
+        mem_per_cpu = int(int(memory) / int(cpus))
 
     # Define variables based on environment or default values
     hostname = gethostname()
@@ -20,15 +100,26 @@ def main():
     }
 
     # Construct NodeName and PartitionName lines
-    node_line = f"NodeName={hostname} State=UNKNOWN CPUs={environ.get('SLURM_CPUS', cpus)} RealMemory={environ.get('SLURM_MEMORY', memory)}"
+    node_parts = [f"NodeName={hostname}", "State=UNKNOWN"]
+    for key in ("CPUs", "Boards", "SocketsPerBoard", "CoresPerSocket", "ThreadsPerCore", "RealMemory"):
+        env_key = ENV_MAP.get(key)
+        value = environ.get(env_key) if env_key else None
+        if value is None:
+            value = dict_status.get(key)
+        if value is not None:
+            node_parts.append(f"{key}={value}")
+    node_line = " ".join(node_parts)
     partition_line = f"PartitionName={environ.get('SLURM_PARTITION_NAME', 'debug')} Default=YES Nodes={hostname} " \
-        f"MaxTime=INFINITE State=UP Shared=YES DefMemPerCPU={environ.get('SLURM_MEMORY_PER_CPU', mem_per_cpu)}"
+        f"MaxTime=INFINITE State=UP Shared=YES"
+    if mem_per_cpu is not None:
+        partition_line += f" DefMemPerCPU={environ.get('SLURM_MEMORY_PER_CPU', mem_per_cpu)}"
 
     with open(CONFIG_FILE_PATH, 'r') as file:
         lines = file.readlines()
 
     # Updated lines with replacements
     updated_lines = []
+    found_keys = set()
     for line in lines:
         stripped_line = line.strip()
 
@@ -43,14 +134,32 @@ def main():
             for key, value in template_params.items():
                 if stripped_line.startswith(f"{key}="):
                     updated_lines.append(f"{key}={value}\n")
+                    found_keys.add(key)
                     updated = True
                     break
+            if not updated:
+                for key, value in FORCED_KV.items():
+                    if stripped_line.startswith(f"{key}="):
+                        updated_lines.append(f"{key}={value}\n")
+                        found_keys.add(key)
+                        updated = True
+                        break
             if not updated:
                 # Keep the line as-is if no match
                 updated_lines.append(line)
 
+    for key, value in template_params.items():
+        if key not in found_keys:
+            updated_lines.append(f"{key}={value}\n")
+    for key, value in FORCED_KV.items():
+        if key not in found_keys:
+            updated_lines.append(f"{key}={value}\n")
+
     with open(CONFIG_FILE_PATH, 'w') as file:
         file.writelines(updated_lines)
+    # Slurm 24.11 supports disabling cgroups, avoiding systemd/cgroup requirements in containers.
+    with open("/etc/slurm/cgroup.conf", "w") as file:
+        file.write("CgroupPlugin=disabled\n")
 
 if __name__ == "__main__":
     main()

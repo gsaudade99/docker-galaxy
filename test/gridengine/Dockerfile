@@ -24,4 +24,9 @@ ADD --chmod=755 setup_gridengine.sh /usr/local/bin/setup_gridengine.sh
 
 
 FROM python:3.10.15 AS sge_bioblend_test
-RUN pip install bioblend==1.3.0
+ENV UV_INSTALL_DIR=/usr/local/bin
+RUN apt-get update -qq \
+    && apt-get install -y curl \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && uv pip install --system bioblend==1.3.0 \
+    && apt-get autoremove -y && apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*

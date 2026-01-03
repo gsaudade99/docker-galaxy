@@ -3,6 +3,8 @@ import fnmatch
 import glob
 import sys
 import os
+import re
+import hashlib
 import shutil
 import subprocess
 
@@ -10,6 +12,7 @@ PG_VERSION = os.environ.get('PG_VERSION', '15')
 GALAXY_UID = int(os.environ['GALAXY_UID'])
 GALAXY_GID = int(os.environ['GALAXY_GID'])
 GALAXY_ROOT_DIR = os.environ.get('GALAXY_ROOT_DIR', '/galaxy/')
+GALAXY_EXPORT_MARKER_PATH = '/export/.galaxy_export_marker'
 
 if len( sys.argv ) == 2:
     PG_DATA_DIR_DEFAULT = sys.argv[1]
@@ -69,24 +72,74 @@ def _ignore_static(dir, *patterns):
         return set(ignored_names)
     return __ignore_static
 
+def _read_image_marker():
+    marker = os.environ.get('GALAXY_EXPORT_MARKER')
+    if marker:
+        return marker.strip()
+    version_py = os.path.join(GALAXY_ROOT_DIR, 'lib', 'galaxy', 'version.py')
+    if os.path.exists(version_py):
+        try:
+            with open(version_py, 'r', encoding='utf-8', errors='ignore') as handle:
+                text = handle.read()
+            # Extract __version__ without importing Galaxy modules during startup.
+            match = re.search(r'__version__\\s*=\\s*[\\\'"]([^\\\'"]+)[\\\'"]', text)
+            if match:
+                return f"version:{match.group(1)}"
+            digest = hashlib.sha256(text.encode('utf-8')).hexdigest()
+            return f"version_py_sha256:{digest}"
+        except Exception:
+            pass
+    version_file = os.path.join(GALAXY_ROOT_DIR, 'VERSION')
+    if os.path.exists(version_file):
+        try:
+            with open(version_file, 'rb') as handle:
+                digest = hashlib.sha256(handle.read()).hexdigest()
+            return f"version_file_sha256:{digest}"
+        except Exception:
+            pass
+    return None
+
+def _should_copy_distribution(marker):
+    if not os.path.exists('/export/galaxy'):
+        return True
+    if not marker:
+        return True
+    try:
+        # Explicit UTF-8 decoding avoids locale-dependent behavior for marker files.
+        with open(GALAXY_EXPORT_MARKER_PATH, 'r', encoding='utf-8') as handle:
+            return handle.read().strip() != marker
+    except OSError:
+        return True
+
+def _write_marker(marker):
+    if not marker:
+        return
+    tmp_path = f"{GALAXY_EXPORT_MARKER_PATH}.tmp"
+    with open(tmp_path, 'w', encoding='utf-8') as handle:
+        handle.write(marker + '\n')
+    os.replace(tmp_path, GALAXY_EXPORT_MARKER_PATH)
+
 if __name__ == "__main__":
     """
         If the '/export/' folder exist, meaning docker was started with '-v /home/foo/bar:/export',
-        we will link every file that needs to persist to the host system. Addionaly a file (/.galaxy_save) is
-        created that indicates all linking is already done.
-        If the user re-starts (with docker start) the container the file /.galaxy_save is found and the linking
-        is aborted.
+        we will link every file that needs to persist to the host system. A marker file at
+        /export/.galaxy_export_marker is written to indicate the export contents match the image version.
+        If the user re-starts (with docker start) the container and the marker matches, the linking
+        is skipped.
     """
-    galaxy_distrib_paths = {os.path.join(GALAXY_ROOT_DIR, 'config'): '/export/.distribution_config',
-                            os.path.join(GALAXY_ROOT_DIR, 'lib'): '/export/galaxy/lib',
-                            os.path.join(GALAXY_ROOT_DIR, 'tools'): '/export/galaxy/tools'}
-    for image_path, export_path in galaxy_distrib_paths.items():
-        if os.path.exists(export_path):
-            shutil.rmtree(export_path)
-        # Ignore 2 dead symlinks in galaxy code: see https://github.com/galaxyproject/galaxy/issues/9847
-        shutil.copytree( image_path, export_path, ignore=_ignore_static(os.path.join(GALAXY_ROOT_DIR, '/lib/galaxy/web/framework/static/style'), 'question-octagon-frame.png', 'ok_small.png') )
+    marker = _read_image_marker()
+    if _should_copy_distribution(marker):
+        galaxy_distrib_paths = {os.path.join(GALAXY_ROOT_DIR, 'config'): '/export/.distribution_config',
+                                os.path.join(GALAXY_ROOT_DIR, 'lib'): '/export/galaxy/lib',
+                                os.path.join(GALAXY_ROOT_DIR, 'tools'): '/export/galaxy/tools'}
+        for image_path, export_path in galaxy_distrib_paths.items():
+            if os.path.exists(export_path):
+                shutil.rmtree(export_path)
+            # Ignore 2 dead symlinks in galaxy code: see https://github.com/galaxyproject/galaxy/issues/9847
+            shutil.copytree( image_path, export_path, ignore=_ignore_static(os.path.join(GALAXY_ROOT_DIR, '/lib/galaxy/web/framework/static/style'), 'question-octagon-frame.png', 'ok_small.png') )
 
-    shutil.copy(os.path.join(GALAXY_ROOT_DIR, 'requirements.txt'), '/export/galaxy/requirements.txt')
+        shutil.copy(os.path.join(GALAXY_ROOT_DIR, 'requirements.txt'), '/export/galaxy/requirements.txt')
+        _write_marker(marker)
 
     _makedir('/export/galaxy/')
     _makedir('/export/ftp/')
