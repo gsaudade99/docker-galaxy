@@ -232,4 +232,6 @@ fi
 
 docker stop galaxy
 docker rm -f galaxy
-docker rmi -f $DOCKER_RUN_CONTAINER || true
+if [[ "${KEEP_IMAGE:-false}" != "true" ]]; then
+    docker rmi -f $DOCKER_RUN_CONTAINER || true
+fi
