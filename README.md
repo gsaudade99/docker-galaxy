@@ -56,8 +56,6 @@ It is deployed completely differently and gained many new features with many new
 - [Integrating non-Tool Shed tools into the container](#Integrating-non-Tool-Shed-tools-into-the-container)
 - [Users & Passwords](#Users-Passwords)
 - [Development](#Development)
-  - [CI Test Matrix](#CI-Test-Matrix)
-  - [CI Bot Commands](#CI-Bot-Commands)
 - [Requirements](#Requirements)
 - [Changelog](./Changelog.md)
 - [Support & Bug Reports](#Support-Bug-Reports)
@@ -1007,48 +1005,6 @@ To keep docker images lean and optimize storage, we recommend using [Dive](https
 
 ```bash
 dive <your-docker-image-name>
-```
-
-## CI Test Matrix <a name="CI-Test-Matrix" /> [[toc]](#toc)
-
-The list below summarizes the non-compose CI coverage for the main Galaxy image.
-
-* Lint
-  * `.github/workflows/lint.yml`
-  * Shellcheck + hadolint 
-* Container testing
-  * `.github/workflows/single_container.yml` (runs `.github/workflows/single.sh`)
-  * Build image, `/export` mount
-  * Galaxy API ready
-  * HTTPS self-signed check
-  * SFTP upload (FTP passive is skipped)
-  * CVMFS autofs mount
-  * SLURM job test (`test/slurm/test.sh`)
-  * BioBlend tests (`test/bioblend/test.sh`)
-  * image (size) analysis (dive)
-  * Grid Engine (SGE) (`test/gridengine/test.sh`)
-
-## CI Bot Commands <a name="CI-Bot-Commands" /> [[toc]](#toc)
-
-This repository supports comment-driven image workflows on issues and PRs. Images are published as GitHub Actions artifacts (not pushed to Quay). Artifacts are split to stay under the 2GB limit and are retained for 48 hours.
-
-`@bot please fetch artefacts` (PRs only)
-Returns download instructions for the latest successful `single_container.yml` run of the PR. The image is tagged as `galaxy:pr-<PR>-<shortsha>`.
-
-`@bot please build https://github.com/<owner>/galaxy/archive/refs/heads/<branch>.zip`
-`@bot please build https://github.com/<owner>/galaxy/archive/<commit>.tar.gz`
-Builds an image from the requested Galaxy source and uploads the split artifacts. Maintainers (OWNER/MEMBER/COLLABORATOR) get a build; non-maintainers get a PR that updates `galaxy/Dockerfile` with the new `GALAXY_REPO` and `GALAXY_RELEASE`.
-
-Example download/reassemble flow:
-
-```bash
-gh run download <run-id> -n galaxy-image-<PR>-part-00
-gh run download <run-id> -n galaxy-image-<PR>-part-01
-gh run download <run-id> -n galaxy-image-<PR>-part-02
-gh run download <run-id> -n galaxy-image-<PR>-part-03
-cat galaxy-image.tar.part-* > galaxy-image.tar
-docker load -i galaxy-image.tar
-docker run --rm -p 8080:80 galaxy:pr-<PR>-<shortsha>
 ```
 
 # Requirements <a name="Requirements" /> [[toc]](#toc)
